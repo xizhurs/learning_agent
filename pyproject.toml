@@ -1,0 +1,37 @@
+[project]
+name = "rag"
+version = "0.1.0"
+description = "Local RAG over carbon methodology documents (LanceDB + Ollama + RAGAS)"
+requires-python = ">=3.11"
+dependencies = [
+    "lancedb",
+    "pyarrow",
+    "docling",
+    "ollama",
+    "sentence-transformers",
+    "tantivy",
+    "fastapi",
+    "uvicorn",
+    "pydantic>=2",
+    "pydantic-settings",
+    "pyyaml",
+    "ragas",
+    "langchain-ollama",
+    "langchain-openai",          # hosted RAGAS judge via an OpenAI-compatible endpoint (Google AI Studio / Gemini)
+    "openai",
+    "langchain-community<0.4",   # ragas 0.4.x imports chat_models.vertexai, removed in 0.4
+    "pytest",
+    "arize-phoenix-otel>=0.17.2",
+    "arize-phoenix-client>=3.5.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

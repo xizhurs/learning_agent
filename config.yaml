@@ -1,0 +1,62 @@
+# All tunables for the RAG pipeline. Override any value per-run via env, e.g.
+#   RAG__RETRIEVAL__MODE=vector  RAG__CHUNKING__MAX_TOKENS=256
+
+paths:
+  documents_dir: data/documents
+  processed_dir: data/processed
+  lancedb_dir: data/lancedb
+  table_name: chunks
+  eval_dir: data/eval
+
+chunking:
+  strategy: heading_aware   # heading_aware | fixed_tokens
+  max_tokens: 512           # measured with the embedding model's tokenizer approximation (see chunk.py)
+  overlap: 64               # only used by fixed_tokens, and when splitting an oversized paragraph
+  table_as_own_chunk: true  # tables are never merged with surrounding prose
+  heading_prefix: true      # prepend "Doc > Section > Subsection" to each chunk's text
+
+embedding:
+  model: nomic-embed-text
+  doc_prefix: "search_document: "
+  query_prefix: "search_query: "
+  batch_size: 32
+
+retrieval:
+  mode: fts                 # vector | fts | hybrid  (dev ablation winner; see README. Confirm on the held-out set)
+  candidates_k: 30          # how many chunks to pull before reranking
+  top_k: 5                  # chunks finally passed to the LLM (after rerank, or truncation if rerank off)
+  source_filter: null       # e.g. "VM0047-v1.1_Final.pdf" to restrict to one document
+
+rerank:
+  enabled: false            # reranking hurt FTS and costs ~15 s/query on CPU; helps vector-only search
+  model: BAAI/bge-reranker-base   # cross-encoder, runs on CPU
+  min_score: null           # drop chunks scoring below this (sigmoid-scale 0-1); null = keep all
+
+generation:
+  model: llama3.2:3b
+  temperature: 0.0
+  num_ctx: 8192             # Ollama's default context is too small for several chunks
+  max_answer_tokens: 400    # hard cap; stops the 8B model from rambling
+  repeat_penalty: 1.1
+  refuse_if_no_context: true
+  rewrite_followups: true   # condense chat history + follow-up into a standalone question
+
+eval:
+  # RAGAS judge (opt-in via `run_eval run --ragas`). Google AI Studio (Gemini, OpenAI-compatible endpoint) by default; key comes from the env var below.
+  # Other OpenAI-compatible hosts work via RAG__EVAL__JUDGE_BASE_URL / _MODEL / _API_KEY_ENV (e.g. Mistral).
+  judge_provider: openai_compatible   # openai_compatible | ollama (local; very slow on CPU)
+  judge_model: gemini-3.5-flash-lite   # confirm with: python -m rag.eval.run_eval check-judge
+  judge_base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+  judge_api_key_env: GEMINI_API_KEY
+  judge_allowed_source: VM0047-v1.1_Final.pdf   # ONLY this document's items/chunks may be sent to the hosted judge
+  judge_max_workers: 2                # keep low: free tiers have tight rate limits
+  judge_reasoning_effort: low         # low | none | minimal ...: less 'thinking' = faster judge calls; pick via check-judge
+  judge_min_interval_s: 0             # >0 spaces hosted-judge requests (set from the rate `check-judge` measures)
+  hit_ks: [1, 3, 5]
+  overlap_threshold: 0.6    # fraction of reference passage tokens that must appear in a retrieved chunk to count as a hit
+
+tracing:
+  # Local Arize Phoenix (start it with `phoenix serve`, UI at http://localhost:6006). Skipped automatically if not running.
+  enabled: true
+  endpoint: http://localhost:6006/v1/traces
+  project_name: carbon-rag

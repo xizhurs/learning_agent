@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Documents (the PD draft is confidential), derived indexes and eval data (contain passages and answers from them) stay local
+data/
+
+# secrets
+.env
+.env.*
