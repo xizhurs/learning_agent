@@ -12,7 +12,7 @@ from rag.tracing import Span, child_of
 
 NOT_FOUND = "I could not find this in the provided documents."
 
-SYSTEM_PROMPT = f"""You answer questions about technical support documents.
+SYSTEM_PROMPT = f"""You answer questions about scientific papers.
 Use ONLY the numbered context passages provided. Rules:
 - If the passages do not contain the answer, reply with exactly this sentence and nothing else: "{NOT_FOUND}"
 - Otherwise answer directly in at most 6 sentences (or a short bullet list) and never include the sentence above.

@@ -8,11 +8,11 @@
 
 Outputs go to data/eval/runs/<timestamp>_<tag>_<testset>/ : config.json, items.jsonl, summary.json
 --testset defaults to the dev set (testset); tune on it, and run the holdout (testset_holdout) only on the final config.
---testset may be a sub-path, e.g. techqa_tiny/dev (rows {id, question, answer, is_impossible, gold_context_ids} are normalised by
+--testset may be a sub-path, e.g. qasper_tiny/dev (rows {id, question, answer, is_impossible, gold_context_ids} are normalised by
 normalize_item; `rank` is then a document-level hit and `answer_rank` the answer-text hit).
 If eval.judge_allowed_source is set, --ragas runs are restricted to that document's single-passage questions, retrieval is
 filtered to that document, and assert_hosted_safe() refuses to send anything else to a hosted judge. If it is null (public
-corpus such as TechQA) nothing is restricted.
+corpus such as QASPER or TechQA) nothing is restricted.
 """
 from __future__ import annotations
 
@@ -32,25 +32,27 @@ from rag.tracing import annotate, enabled as tracing_enabled, flush as flush_tra
 
 
 def slugify_testset(name: str) -> str:
-    """Testset name usable inside a folder name ('techqa_tiny/dev' -> 'techqa_tiny_dev')."""
+    """Testset name usable inside a folder name ('qasper_tiny/dev' -> 'qasper_tiny_dev')."""
     return re.sub(r"[\\/]+", "_", name)
 
 
 def normalize_item(item: dict) -> dict:
-    """TechQA-style rows {id, question, answer, is_impossible, gold_context_ids} -> the runner schema; other rows pass through."""
+    """TechQA / QASPER-style rows {id, question, answer, is_impossible, gold_context_ids[, evidence]} -> the runner schema; other
+    rows pass through. `evidence` (QASPER: evidence paragraphs joined with ' ... ') becomes the quote scored as answer_rank."""
     if "is_impossible" not in item or "reference_answer" in item:
         return item
     answerable = not item["is_impossible"]
     gold = list(item.get("gold_context_ids") or [])
     answer = item["answer"] if answerable else ""
     return {**item, "type": "factual", "answerable": answerable, "source": gold[0] if gold else "",
-            "reference_answer": answer, "reference_quote": answer, "gold_context_ids": gold}
+            "reference_answer": answer, "reference_quote": (item.get("evidence") or answer) if answerable else "",
+            "gold_context_ids": gold}
 
 
 def load_testset(settings: Settings, name: str = "testset") -> list[dict]:
     path = settings.paths.resolve("eval_dir") / f"{name}.jsonl"
     if not path.exists():
-        raise SystemExit(f"{path} not found - run: python -m rag.eval.gen_testset export / import")
+        raise SystemExit(f"{path} not found - build one with scripts/create_qasper_tiny.py (then use --testset qasper_tiny/dev)")
     return [normalize_item(json.loads(l)) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
@@ -454,7 +456,7 @@ def cmd_score_ragas(args) -> None:
 
 
 JUDGE_PROMPT = """\
-You are grading answers from a question-answering system over technical support documents.
+You are grading answers from a question-answering system over scientific papers.
 For each item below, score from 1 (worst) to 5 (best), using ONLY the retrieved contexts and the reference answer:
 - faithfulness: every claim in the answer is supported by the retrieved contexts (no invented facts)
 - correctness: the answer agrees with the reference answer (for unanswerable items, 5 = correctly says it cannot find the answer)

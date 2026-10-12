@@ -23,6 +23,29 @@ ollama pull nomic-embed-text llama3.2:3b
 Tracked changes in the DOCX are accepted before parsing (`src/rag/ingest/docx_clean.py`).
 Changing `chunking.*` or `embedding.*` requires re-running `rag.ingest`.
 
+## Dataset: QASPER tiny (current corpus)
+`uv run python scripts/create_qasper_tiny.py` downloads QASPER (allenai/qasper, CC BY 4.0; validation + test splits) into
+`data/raw/qasper/` and writes:
+- `data/documents/<paper id>.md`: 200 NLP papers (`#` title, `##` sections, `###` subsections), parsed without Docling.
+  100 are the papers the questions are about, 100 are random distractors.
+- `data/eval/qasper_tiny/{dev,val,test}.jsonl`: 100 questions, one per paper (dev 32+8, val 24+6, test 24+6
+  answerable + unanswerable). Plus `contexts.jsonl`, `manifest.json` and `sample_preview.md`.
+
+How questions are chosen:
+- At least two annotators, all agreeing on answerable vs. unanswerable.
+- Answerable questions need text evidence; a table or figure alone does not count.
+- Each question is prefixed with its paper's title, because QASPER questions ("which datasets do they use?") are ambiguous
+  across papers. That makes document-level `hit@k` easy, so tune on `answer_hit@k`: an annotator evidence paragraph found
+  in a retrieved chunk.
+
+Workflow:
+1. Run `uv run python -m rag.ingest`. It reuses embeddings cached in `data/processed/embed_cache/`, so an interrupted
+   run resumes.
+2. Evaluate with `uv run python -m rag.eval.run_eval run --retrieval-only --testset qasper_tiny/dev`.
+
+`retrieval.mode: fts` and `rerank.enabled: false` were the TechQA winners, so ablate them again on QASPER. The TechQA
+files are archived in `data/archive/techqa/`.
+
 ## Evaluation (ground truth and answer judging by Claude in the Claude app)
 1. `uv run python -m rag.eval.gen_testset export` writes `data/eval/packets/packet_NN.md`.
 2. Paste each `.md` packet into the Claude app (one chat each). Save the JSON-only reply as
