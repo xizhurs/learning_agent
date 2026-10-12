@@ -24,7 +24,8 @@ import time
 from pathlib import Path
 
 from rag.config import Settings, get_settings
-from rag.eval.metrics import first_doc_rank, first_hit_rank, is_refusal, latency_summary, retrieval_summary, spearman
+from rag.eval.metrics import (answer_overlap, context_precision, evidence_recall, first_doc_rank, first_hit_rank, is_refusal,
+                              latency_summary, retrieval_summary, spearman)
 from rag.generate import build_messages, generate
 from rag.ingest.build import ensure_table
 from rag.retrieve import retrieve
@@ -111,12 +112,28 @@ def summarise(rows: list[dict], settings: Settings) -> dict:
         # document-level hit@k / mrr above; the same ranks judged by whether the chunk actually contains the answer text
         by_answer = retrieval_summary([r.get("answer_rank") for r in answerable], settings.eval.hit_ks)
         summary |= {f"answer_{k}": v for k, v in by_answer.items() if k != "n_answerable"}
+    quoted = [r for r in answerable if r.get("reference_quote")]
+    if quoted:
+        # evidence level: share of the evidence paragraphs in the top k, and rank-weighted precision of the retrieved chunks
+        thr = settings.eval.overlap_threshold
+        for k in settings.eval.hit_ks:
+            rec = [evidence_recall(r["reference_quote"], [h["text"] for h in r["retrieved"][:k]], thr) for r in quoted]
+            rec = [x for x in rec if x is not None]
+            summary[f"evidence_recall@{k}"] = sum(rec) / len(rec) if rec else None
+        summary["context_precision"] = sum(context_precision(r["reference_quote"], [h["text"] for h in r["retrieved"]], thr)
+                                           for r in quoted) / len(quoted)
     if rows and rows[0]["answer"] is not None:
         unans = [r for r in rows if not r["answerable"]]
         summary["refusal_rate_on_unanswerable"] = (
             sum(is_refusal(r["answer"]) for r in unans) / len(unans) if unans else None)
         summary["false_refusal_rate_on_answerable"] = (
             sum(is_refusal(r["answer"]) for r in answerable) / len(answerable) if answerable else None)
+        # refusing exactly when the question is unanswerable, over all questions
+        summary["not_found_accuracy"] = sum(is_refusal(r["answer"]) != r["answerable"] for r in rows) / len(rows)
+        overlaps = [answer_overlap(r["answer"], r["reference_answer"]) for r in answerable if r["reference_answer"]]
+        if overlaps:
+            summary["answer_f1"] = sum(f for f, _ in overlaps) / len(overlaps)
+            summary["answer_token_recall"] = sum(rc for _, rc in overlaps) / len(overlaps)
     lat = latency_summary([r.get("timings") for r in rows])
     if lat:
         summary["latency_s"] = lat
@@ -359,16 +376,18 @@ def apply_judge_scope(testset: list[dict], settings: Settings) -> tuple[list[dic
 
 
 def format_table(results: list[tuple[str, dict]]) -> str:
-    """Comparison table (best MRR first): retrieval, RAGAS (when scored), refusal and latency columns."""
+    """Comparison table (best evidence MRR first, else best MRR): retrieval, evidence, RAGAS (when scored), answer, refusal and
+    latency columns."""
     cols = [("mrr", "mrr"), ("hit@1", "hit@1"), ("hit@3", "hit@3"), ("hit@5", "hit@5"), ("answer_mrr", "ans_mrr"),
-            ("answer_hit@5", "ans_hit@5"), ("faithfulness", "faith"), ("answer_relevancy", "relev"), ("llm_context_precision_with_reference", "ctx_prec"),
-            ("context_recall", "ctx_rec"), ("factual_correctness(mode=f1)", "fact_corr"),
-            ("false_refusal_rate_on_answerable", "false_ref")]
+            ("answer_hit@5", "ans_hit@5"), ("evidence_recall@5", "ev_rec@5"), ("context_precision", "ctx_prec"),
+            ("faithfulness", "faith"), ("answer_relevancy", "relev"), ("llm_context_precision_with_reference", "rg_ctx_pr"),
+            ("context_recall", "ctx_rec"), ("factual_correctness(mode=f1)", "fact_corr"), ("answer_f1", "ans_f1"),
+            ("answer_token_recall", "ans_trec"), ("not_found_accuracy", "nf_acc"), ("false_refusal_rate_on_answerable", "false_ref")]
     cols = [(k, h) for k, h in cols if any(isinstance(s.get(k), float) for _, s in results)]
     lat = lambda s, step: (s.get("latency_s", {}).get(step) or {}).get("median")
     header = ["variant".ljust(40)] + [h.rjust(9) for _, h in cols] + ["gen_s".rjust(7), "total_s".rjust(8), "sec".rjust(6)]
     lines = [" | ".join(header)]
-    for label, s in sorted(results, key=lambda r: -(r[1].get("mrr") or 0)):
+    for label, s in sorted(results, key=lambda r: (-(r[1].get("answer_mrr") or 0), -(r[1].get("mrr") or 0))):
         cells = [(f"{s[k]:.3f}" if isinstance(s.get(k), float) else "-").rjust(9) for k, _ in cols]
         g, t = lat(s, "generate"), lat(s, "total")
         lines.append(" | ".join([label.ljust(40)] + cells + [(f"{g:.1f}" if g is not None else "-").rjust(7),

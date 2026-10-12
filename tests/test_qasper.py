@@ -169,3 +169,50 @@ def test_embed_ignores_line_cut_off_by_a_crash(tmp_path, fake_ollama):
 def test_embed_names_a_text_that_keeps_failing(tmp_path, fake_ollama):
     with pytest.raises(RuntimeError, match="BAD chunk"):
         embed.embed_documents(["fine", "BAD chunk", "also fine"], Embedding(batch_size=4), tmp_path / "m.jsonl")
+
+
+EV1 = "We train the tagger on the Penn Treebank with standard splits."
+EV2 = "Results on the test set show a gain of two points in accuracy."
+
+
+def test_evidence_recall_counts_each_paragraph():
+    from rag.eval.metrics import evidence_recall
+    quote = f"{EV1} ... {EV2}"
+    assert evidence_recall(quote, [f"Intro. {EV1} More."], 0.6) == 0.5
+    assert evidence_recall(quote, [EV2, f"x {EV1}"], 0.6) == 1.0
+    assert evidence_recall("too short", ["too short"], 0.6) is None
+
+
+def test_context_precision_is_rank_weighted():
+    from rag.eval.metrics import context_precision
+    other = "Something unrelated about a different topic entirely here."
+    assert context_precision(EV1, [EV1, other, other], 0.6) == 1.0
+    assert context_precision(EV1, [other, EV1, other], 0.6) == 0.5
+    assert context_precision(EV1, [EV1, other, EV1], 0.6) == (1 + 2 / 3) / 2
+    assert context_precision(EV1, [other], 0.6) == 0.0
+
+
+def test_answer_overlap_normalises_like_qasper():
+    from rag.eval.metrics import answer_overlap
+    assert answer_overlap("The Penn Treebank [1].", "penn treebank") == (1.0, 1.0)
+    f1, rec = answer_overlap("Yes, the categories were evaluated by humans [2].", "Yes")
+    assert rec == 1.0 and 0 < f1 < 0.5
+    assert answer_overlap("No idea", "Penn Treebank") == (0.0, 0.0)
+
+
+def test_summarise_reports_evidence_answer_and_not_found_metrics():
+    from rag.config import Settings
+    from rag.eval.run_eval import summarise
+    from rag.generate import NOT_FOUND
+    other = "Something unrelated about a different topic entirely here."
+    rows = [
+        {"answerable": True, "rank": 1, "answer_rank": 2, "reference_quote": f"{EV1} ... {EV2}", "reference_answer": "Penn Treebank",
+         "retrieved": [{"text": other}, {"text": EV1}], "answer": "The Penn Treebank [2]."},
+        {"answerable": True, "rank": 1, "answer_rank": None, "reference_quote": EV2, "reference_answer": "two points",
+         "retrieved": [{"text": other}], "answer": NOT_FOUND},
+        {"answerable": False, "rank": None, "reference_quote": "", "reference_answer": "", "retrieved": [], "answer": NOT_FOUND},
+    ]
+    s = summarise(rows, Settings())
+    assert s["evidence_recall@1"] == 0.0 and s["evidence_recall@5"] == 0.25
+    assert s["context_precision"] == 0.25
+    assert s["not_found_accuracy"] == 2 / 3 and s["answer_f1"] == 0.5 and s["answer_token_recall"] == 0.5
