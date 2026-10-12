@@ -8,8 +8,8 @@ Reads every folder under --runs (depth 1 or 2) that contains items.jsonl (+ conf
 ablation, or one folder per `run_eval run`. Nothing in the evaluation is changed or re-run; everything is derived from the saved rows.
 
 Output (--out, default outputs/eval_reports/):
-  rag_ablation_report.xlsx   sheets: summary_by_run, per_question_results, retrieval_details, answer_details, failure_analysis, config
-                             (text cells cut to 1000 characters, header frozen, autofilter on)
+  rag_ablation_report.xlsx   sheets: summary_by_run, per_question_results, retrieval_details, answer_details, failure_analysis, config,
+                             paired_comparison, difficulty_check (text cells cut to 1000 characters, header frozen, autofilter on)
   per_question_results.csv, failure_analysis.csv   full text
   raw_results.jsonl          one line per run/question with the complete saved row, run config and derived fields (nothing cut)
 
@@ -24,12 +24,23 @@ How the derived columns are defined:
   citation_correct        heuristic, answerable non-refusal answers only: every [n] is within the retrieved list and one cites a gold document
   failure_type            first match of: retrieval_miss, false_refusal, missed_refusal, wrong_answer, low_faithfulness, bad_citation,
                           late_hit (gold document first at rank > 3). Any further problems are listed in `notes`.
+
+How to tell whether a test set is too easy to separate the runs (summary_by_run and the two extra sheets):
+  recall_at_1_ci95_*      95% Wilson interval of context_recall_at_1 over the answerable questions. Runs whose intervals overlap are not
+                          distinguishable on this test set; with 48 questions one question is already 2 points.
+  answer_text_recall_at_*  chunk-level recall: the share of questions whose reference answer text (word 3-grams, rag.eval.metrics) is in
+                          the top-k chunks. Stricter than the document-level recall and the only one that reacts to chunk size.
+  paired_comparison       every run against the best run (highest mrr) of the same test set, question by question: wins / losses at
+                          rank 1 and within the top 5, and the exact two-sided sign-test p-value of the wins vs losses.
+  difficulty_check        a ranker that only counts words shared by the question and the gold document's title (no embeddings), on the
+                          corpus in <testset folder>/contexts.jsonl. If it is close to the real retrievers the corpus is easy.
 """
 from __future__ import annotations
 
 import argparse
 import fnmatch
 import json
+import math
 import re
 import subprocess
 import sys
@@ -47,11 +58,19 @@ FACT_CORRECTNESS = "factual_correctness(mode=f1)"
 
 SUMMARY_COLS = ["run_id", "retriever_type", "chunk_size", "chunk_overlap", "top_k", "reranker", "query_rewrite", "num_questions",
                 "context_recall_at_1", "context_recall_at_3", "context_recall_at_5", "mrr", "answer_accuracy", "faithfulness_avg",
-                "not_found_accuracy", "avg_latency_sec", "avg_prompt_tokens", "avg_completion_tokens", "estimated_cost", "recall_basis"]
+                "not_found_accuracy", "avg_latency_sec", "avg_prompt_tokens", "avg_completion_tokens", "estimated_cost", "recall_basis",
+                "n_answerable", "recall_at_1_ci95_low", "recall_at_1_ci95_high", "answer_text_recall_at_1", "answer_text_recall_at_3",
+                "answer_text_recall_at_5"]
 PER_QUESTION_COLS = ["run_id", "question_id", "split", "question", "is_impossible", "gold_answer", "gold_context_ids",
                      "retrieved_context_ids", "retrieved_chunk_ids", "gold_context_hit_at_1", "gold_context_hit_at_3",
                      "gold_context_hit_at_5", "gold_context_rank", "generated_answer", "answer_correct", "faithfulness_score",
-                     "citation_correct", "failure_type", "notes"]
+                     "citation_correct", "failure_type", "notes", "answer_text_rank"]
+PAIRED_COLS = ["run_id", "testset", "reference_run", "n_paired", "hit1_wins", "hit1_losses", "hit1_sign_test_p",
+               "hit5_wins", "hit5_losses", "hit5_sign_test_p"]
+DIFFICULTY_COLS = ["testset", "baseline", "n_answerable", "n_documents", "gold_share_of_documents", "context_recall_at_1",
+                   "context_recall_at_3", "context_recall_at_5", "mrr"]
+STOPWORDS = set("the a an to of in is are for and or with on how do does can what i we you it this that be from by at as not if my "
+                "our when".split())
 RETRIEVAL_COLS = ["run_id", "question_id", "rank", "chunk_id", "context_id", "source", "score", "is_gold_context", "chunk_text_preview"]
 ANSWER_COLS = ["run_id", "question_id", "question", "gold_answer", "generated_answer", "retrieved_context_preview", "judge_explanation",
                "faithfulness_score", "answer_score"]
@@ -251,7 +270,9 @@ def derive(row: dict, gold_fallback: list[str], judge: dict | None, correct_thre
         "gold_answer": row.get("reference_answer") or "", "gold_context_ids": gold,
         "retrieved_context_ids": context_ids, "retrieved_chunk_ids": chunk_ids,
         "gold_context_hit_at_1": hit(1), "gold_context_hit_at_3": hit(3), "gold_context_hit_at_5": hit(5),
-        "gold_context_rank": rank, "generated_answer": answer, "answer_correct": correct, "answer_score": answer_score,
+        "gold_context_rank": rank, "answer_text_rank": None if is_impossible else row.get("answer_rank"),
+        "answer_text_known": not is_impossible and "answer_rank" in row,
+        "generated_answer": answer, "answer_correct": correct, "answer_score": answer_score,
         "faithfulness_score": faith, "judge_explanation": (judge or {}).get("comment"),
         "citation_correct": None if is_impossible else citation_check(answer, retrieved, gold),
         "recall_basis": "document" if (gold and not is_impossible) else ("answer_quote" if not is_impossible else None),
@@ -263,6 +284,72 @@ def derive(row: dict, gold_fallback: list[str], judge: dict | None, correct_thre
 def mean(values) -> float | None:
     vals = [v for v in values if v is not None]
     return round(sum(vals) / len(vals), 4) if vals else None
+
+
+def wilson(hits: int, n: int, z: float = 1.96) -> tuple[float, float] | tuple[None, None]:
+    """95% Wilson score interval of a proportion; (None, None) without observations."""
+    if n == 0:
+        return None, None
+    p, denom = hits / n, 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return round(max(0.0, centre - half), 4), round(min(1.0, centre + half), 4)
+
+
+def sign_test_p(wins: int, losses: int) -> float:
+    """Exact two-sided sign test (ties are left out): probability of a split at least this uneven if both runs were equally good."""
+    n = wins + losses
+    if n == 0:
+        return 1.0
+    tail = sum(math.comb(n, i) for i in range(min(wins, losses) + 1)) / 2 ** n
+    return round(min(1.0, 2 * tail), 4)
+
+
+def paired_comparison(runs: list[dict]) -> list[dict]:
+    """Each run against the best run (highest mrr, then run id) of its test set. `runs`: dicts with run_id, testset, mrr and
+    hits = {question_id: (hit@1, hit@5)} over the answerable questions. The reference run itself gets no row."""
+    out = []
+    for testset in sorted({r["testset"] for r in runs}):
+        group = sorted((r for r in runs if r["testset"] == testset), key=lambda r: (-(r["mrr"] or 0.0), r["run_id"]))
+        ref = group[0]
+        for r in group[1:]:
+            shared = sorted(set(r["hits"]) & set(ref["hits"]))
+            row = {"run_id": r["run_id"], "testset": testset, "reference_run": ref["run_id"], "n_paired": len(shared)}
+            for slot, k in ((0, 1), (1, 5)):
+                wins = sum(r["hits"][q][slot] and not ref["hits"][q][slot] for q in shared)
+                losses = sum(ref["hits"][q][slot] and not r["hits"][q][slot] for q in shared)
+                row |= {f"hit{k}_wins": wins, f"hit{k}_losses": losses, f"hit{k}_sign_test_p": sign_test_p(wins, losses)}
+            out.append(row)
+    return out
+
+
+def title_baseline(testset: str, questions: dict[str, dict], contexts_path: Path) -> dict | None:
+    """Recall of a retriever that only counts words shared by the question and a document's first line (its title), over the documents
+    in contexts.jsonl. None when that file or gold ids are missing. Documents are ranked by overlap / sqrt(title length), then by id."""
+    if not contexts_path.exists():
+        return None
+    docs = {c["context_id"]: c for c in read_jsonl(contexts_path)}
+    words = lambda s: set(re.findall(r"[a-z0-9][a-z0-9_.\-]+", s.lower())) - STOPWORDS
+    titles = {}
+    for cid, c in docs.items():
+        first = (c["text"].strip().splitlines() or [""])[0]
+        titles[cid] = words(first.removeprefix("Title:"))
+    ranks = []
+    for q in questions.values():
+        gold = set(q.get("gold_context_ids") or [])
+        if q.get("is_impossible") or not gold:
+            continue
+        qw = words(q["question"])
+        order = sorted(titles, key=lambda cid: (-len(qw & titles[cid]) / (len(titles[cid]) ** 0.5 + 1e-9), cid))
+        ranks.append(next((i for i, cid in enumerate(order, 1) if cid in gold), None))
+    if not ranks:
+        return None
+    hit = lambda k: round(sum(r is not None and r <= k for r in ranks) / len(ranks), 4)
+    gold_docs = sum(c.get("role") == "gold" for c in docs.values())
+    return {"testset": testset, "baseline": "title_word_overlap", "n_answerable": len(ranks), "n_documents": len(docs),
+            "gold_share_of_documents": round(gold_docs / len(docs), 4) if gold_docs else None,
+            "context_recall_at_1": hit(1), "context_recall_at_3": hit(3), "context_recall_at_5": hit(5),
+            "mrr": round(sum(1 / r for r in ranks if r) / len(ranks), 4)}
 
 
 def config_record(run_id: str, run_dir: Path, cfg: dict, commit: str) -> dict:
@@ -288,6 +375,8 @@ def build_report(runs_dir: Path, only: str | None = None, correct_threshold: flo
     testsets: dict = {}
     token_cache: dict = {}
     summaries, per_q, retr, ans, fail, configs, raw = [], [], [], [], [], [], []
+    paired_input: list[dict] = []
+    baseline_inputs: dict[str, Path] = {}                    # testset name -> folder of its contexts.jsonl
 
     for run_dir in dirs:
         run_id = run_id_of(run_dir, runs_dir)
@@ -341,6 +430,16 @@ def build_report(runs_dir: Path, only: str | None = None, correct_threshold: flo
         answerable = [d for d in derived if not d["is_impossible"]]
         impossible = [d for d in derived if d["is_impossible"]]
         bases = {d["recall_basis"] for d in answerable}
+        n_hit1 = sum(bool(d["gold_context_hit_at_1"]) for d in answerable)
+        ci_low, ci_high = wilson(n_hit1, len(answerable))
+        with_text = [d for d in answerable if d["answer_text_known"]]
+        text_recall = {k: mean(d["answer_text_rank"] is not None and d["answer_text_rank"] <= k for d in with_text)
+                       for k in (1, 3, 5)}
+        mrr = mean((1 / d["gold_context_rank"]) if d["gold_context_rank"] else 0.0 for d in answerable) if answerable else None
+        paired_input.append({"run_id": run_id, "testset": testset_name, "mrr": mrr,
+                             "hits": {d["question_id"]: (bool(d["gold_context_hit_at_1"]), bool(d["gold_context_hit_at_5"]))
+                                      for d in answerable}})
+        baseline_inputs.setdefault(testset_name, (eval_dir / testset_name).parent / "contexts.jsonl")
         p_tok, c_tok = [d["prompt_tokens"] for d in derived], [d["completion_tokens"] for d in derived]
         known = [(p, c) for p, c in zip(p_tok, c_tok) if p is not None]
         if price_in == 0 and price_out == 0:
@@ -352,15 +451,18 @@ def build_report(runs_dir: Path, only: str | None = None, correct_threshold: flo
             "chunk_overlap": conf["chunk_overlap"], "top_k": conf["top_k"], "reranker": conf["reranker_model"],
             "query_rewrite": conf["query_rewrite"], "num_questions": len(derived),
             **{f"context_recall_at_{k}": mean(d[f"gold_context_hit_at_{k}"] for d in answerable) for k in (1, 3, 5)},
-            "mrr": mean((1 / d["gold_context_rank"]) if d["gold_context_rank"] else 0.0 for d in answerable) if answerable else None,
+            "mrr": mrr,
             "answer_accuracy": mean(d["answer_correct"] for d in answerable),
             "faithfulness_avg": mean(d["faithfulness_score"] for d in answerable),
             "not_found_accuracy": mean(d["answer_correct"] for d in impossible),
             "avg_latency_sec": mean(d["seconds"] for d in derived),
             "avg_prompt_tokens": mean(p_tok), "avg_completion_tokens": mean(c_tok), "estimated_cost": cost,
             "recall_basis": "/".join(sorted(b for b in bases if b)) or None,
+            "n_answerable": len(answerable), "recall_at_1_ci95_low": ci_low, "recall_at_1_ci95_high": ci_high,
+            **{f"answer_text_recall_at_{k}": v for k, v in text_recall.items()},
         })
 
+    difficulty = [b for name, path in baseline_inputs.items() if name and (b := title_baseline(name, testsets.get(name, {}), path))]
     frames = {
         "summary_by_run": pd.DataFrame(summaries, columns=SUMMARY_COLS),
         "per_question_results": pd.DataFrame(per_q).reindex(columns=PER_QUESTION_COLS),
@@ -368,6 +470,8 @@ def build_report(runs_dir: Path, only: str | None = None, correct_threshold: flo
         "answer_details": pd.DataFrame(ans, columns=ANSWER_COLS),
         "failure_analysis": pd.DataFrame(fail, columns=FAILURE_COLS),
         "config": pd.DataFrame(configs, columns=CONFIG_COLS),
+        "paired_comparison": pd.DataFrame(paired_comparison(paired_input), columns=PAIRED_COLS),
+        "difficulty_check": pd.DataFrame(difficulty, columns=DIFFICULTY_COLS),
     }
     return frames, raw
 

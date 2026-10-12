@@ -4,11 +4,16 @@
   python scripts/create_techqa_tiny.py --force        # overwrite a previous output
 
 Subset: 100 questions (80 answerable + 20 impossible) split into dev 48+12, val 16+4, test 16+4; the 80 gold contexts; and
-300 random distractor documents from the corpus. Everything is deduplicated by a hash of the normalized text and driven by one
+--distractors (default 300) other corpus documents. Everything is deduplicated by a hash of the normalized text and driven by one
 seed, so reruns give identical files (see manifest.json for the output hashes).
 
-Output: data/eval/techqa_tiny/{dev,val,test,contexts}.jsonl, manifest.json, sample_preview.md; and the 380 documents as flat
-data/documents/<filename>.txt (the ingest loader lists that folder non-recursively, so the source data/documents/corpus/ is not
+By default all distractors are random, which makes retrieval easy: they are mostly about other products than the questions.
+--hard-negatives N makes N of them the corpus documents most similar (idf-weighted word overlap with the gold document's title and
+opening plus the question) to the gold documents, taken round-robin over the gold documents; the rest stay random. With
+--hard-negatives 0 (default) the output is identical to earlier versions of this script.
+
+Output: data/eval/techqa_tiny/{dev,val,test,contexts}.jsonl, manifest.json, sample_preview.md; and the 80 + distractor documents as
+flat data/documents/<filename>.txt (the ingest loader lists that folder non-recursively, so the source data/documents/corpus/ is not
 picked up). On --force only the files listed in the previous contexts.jsonl are removed from data/documents/.
 """
 from __future__ import annotations
@@ -16,18 +21,24 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import random
 import re
 import shutil
 import statistics
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SPLITS = {"dev": (48, 12), "val": (16, 4), "test": (16, 4)}   # (answerable, impossible)
 N_DISTRACTORS = 300
+N_GOLD = sum(a for a, _ in SPLITS.values())
 PREVIEW_CHARS = 300
+HEAD_CHARS = 1500            # how much of a document is used to find similar documents (title + opening)
+COMMON_DF = 0.2              # words in more than this share of the corpus say nothing about topic (a product name can be common)
+STOPWORDS = set("the a an to of in is are for and or with on how do does can what i we you it this that be from by at as not if my "
+                "our when text title ibm united states technote problem abstract".split())
 
 
 def norm(text: str) -> str:
@@ -94,7 +105,57 @@ def pick_distractors(corpus: Path, exclude_hashes: set[str], exclude_names: set[
     raise SystemExit(f"only {len(out)} usable distractors in {corpus}")
 
 
-def build(train: Path, corpus: Path, seed: int) -> dict:
+def topic_words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9][a-z0-9_.\-]+", text.lower())) - STOPWORDS
+
+
+def pick_hard_negatives(corpus: Path, queries: dict[str, str], exclude_hashes: set[str], exclude_names: set[str], n: int
+                        ) -> list[tuple[str, str]]:
+    """n (filename, text) corpus documents closest to the gold documents: the nearest one of every gold document first, then the
+    second nearest of each, and so on. `queries` maps a gold filename to its title/opening plus its question.
+
+    Similarity is the sum of idf over the words a document shares with the query; words in more than COMMON_DF of the corpus are
+    ignored. No randomness: the result depends only on the corpus files and the queries."""
+    names = sorted(p.name for p in corpus.glob("*.txt"))
+    words = {}
+    for name in names:
+        with open(corpus / name, encoding="utf-8", errors="replace") as f:
+            words[name] = topic_words(f.read(HEAD_CHARS))
+    df = Counter(w for ws in words.values() for w in ws)
+    keep = {w for w, c in df.items() if c <= max(COMMON_DF * len(names), 5)}
+    idf = {w: math.log(len(names) / c) for w, c in df.items() if w in keep}
+    postings = defaultdict(list)
+    for name, ws in words.items():
+        for w in ws & keep:
+            postings[w].append(name)
+
+    ranked = {}
+    for gold, query in sorted(queries.items()):
+        score = Counter()
+        for w in topic_words(query) & keep:
+            for name in postings[w]:
+                score[name] += idf[w]
+        ranked[gold] = [name for name, _ in sorted(score.items(), key=lambda kv: (-kv[1], kv[0])) if name not in exclude_names]
+
+    seen, taken, out = set(exclude_hashes), set(), []
+    for depth in range(max((len(v) for v in ranked.values()), default=0)):
+        for gold in sorted(ranked):
+            if depth >= len(ranked[gold]) or ranked[gold][depth] in taken:
+                continue
+            name = ranked[gold][depth]
+            text = read_text(corpus / name)
+            h = text_hash(text)
+            if not text.strip() or h in seen:
+                continue
+            taken.add(name)
+            seen.add(h)
+            out.append((name, text))
+            if len(out) == n:
+                return out
+    raise SystemExit(f"only {len(out)} hard negatives found in {corpus}; ask for fewer or use more random distractors")
+
+
+def build(train: Path, corpus: Path, seed: int, n_distractors: int = N_DISTRACTORS, n_hard: int = 0) -> dict:
     rng = random.Random(seed)
     rows = json.loads(read_text(train))
     cleaned, dropped = clean_questions(rows)
@@ -114,10 +175,18 @@ def build(train: Path, corpus: Path, seed: int) -> dict:
         ia, ii = ia + a, ii + i
 
     gold = {r["contexts"][0]["filename"]: r["contexts"][0]["text"] for r in ans}
-    distractors = pick_distractors(corpus, {text_hash(t) for t in gold.values()}, set(gold), N_DISTRACTORS, rng)
+    exclude_hashes, exclude_names = {text_hash(t) for t in gold.values()}, set(gold)
+    hard = []
+    if n_hard:
+        queries = {r["contexts"][0]["filename"]: r["question"] + "\n" + r["contexts"][0]["text"][:HEAD_CHARS] for r in ans}
+        hard = pick_hard_negatives(corpus, queries, exclude_hashes, exclude_names, n_hard)
+        exclude_hashes |= {text_hash(t) for _, t in hard}
+        exclude_names |= {n for n, _ in hard}
+    distractors = pick_distractors(corpus, exclude_hashes, exclude_names, n_distractors - n_hard, rng)
     contexts = [{"context_id": n, "role": "gold", "text": t} for n, t in sorted(gold.items())] + \
+               [{"context_id": n, "role": "hard_negative", "text": t} for n, t in sorted(hard)] + \
                [{"context_id": n, "role": "distractor", "text": t} for n, t in sorted(distractors)]
-    return {"splits": splits, "contexts": contexts, "dropped": dropped,
+    return {"splits": splits, "contexts": contexts, "dropped": dropped, "n_distractors": n_distractors, "n_hard": n_hard,
             "pool": {"answerable_unique_gold": len(answerable), "impossible": len(impossible), "rows": len(rows)}}
 
 
@@ -133,8 +202,10 @@ def check(result: dict) -> None:
     gold_hashes = [text_hash(r["contexts"][0]["text"]) for r in all_rows if not r["is_impossible"]]
     assert len(gold_hashes) == 80 and len(set(gold_hashes)) == 80, "gold passages must be distinct (no leakage across splits)"
     hashes = [text_hash(c["text"]) for c in contexts]
-    assert len(contexts) == 80 + N_DISTRACTORS and len(set(hashes)) == len(hashes), "contexts must be unique by hash"
-    assert not set(hashes[:80]) & set(hashes[80:]), "a distractor equals a gold passage"
+    assert len(contexts) == N_GOLD + result["n_distractors"] and len(set(hashes)) == len(hashes), "contexts must be unique by hash"
+    assert not set(hashes[:N_GOLD]) & set(hashes[N_GOLD:]), "a distractor equals a gold passage"
+    assert [c["role"] for c in contexts[:N_GOLD]] == ["gold"] * N_GOLD, "gold contexts come first"
+    assert sum(c["role"] == "hard_negative" for c in contexts) == result["n_hard"], "hard negative count"
     assert len({c["context_id"] for c in contexts}) == len(contexts), "context ids"
 
 
@@ -157,7 +228,8 @@ def preview(result: dict, seed: int) -> str:
     lens = [len(c["text"]) for c in contexts]
     out = ["# TechQA tiny subset: sample preview", "",
            f"seed {seed}; {sum(len(v) for v in splits.values())} questions, {sum(c['role'] == 'gold' for c in contexts)} gold contexts, "
-           f"{sum(c['role'] == 'distractor' for c in contexts)} distractors.", "",
+           f"{sum(c['role'] == 'distractor' for c in contexts)} random distractors, "
+           f"{sum(c['role'] == 'hard_negative' for c in contexts)} hard negatives.", "",
            "| split | answerable | impossible | total |", "|---|---|---|---|"]
     for name, rows in splits.items():
         a = sum(not r["is_impossible"] for r in rows)
@@ -224,6 +296,7 @@ def write(result: dict, out: Path, docs_out: Path, seed: int, force: bool) -> No
                        "impossible": sum(bool(r["is_impossible"]) for r in rows)} for n, rows in result["splits"].items()},
         "contexts": {"gold": sum(c["role"] == "gold" for c in result["contexts"]),
                      "distractor": sum(c["role"] == "distractor" for c in result["contexts"]),
+                     "hard_negative": result["n_hard"],
                      "chars_median": int(statistics.median(lens)), "chars_max": max(lens)},
         "source": result["pool"] | {"dropped": result["dropped"]},
         "docs_dir": str(docs_out),
@@ -239,21 +312,26 @@ def main() -> None:
     ap.add_argument("--corpus", type=Path, default=ROOT / "data/documents/corpus")
     ap.add_argument("--out", type=Path, default=ROOT / "data/eval/techqa_tiny", help="questions, contexts, manifest, preview")
     ap.add_argument("--docs-out", type=Path, default=ROOT / "data/documents",
-                    help="where the 380 .txt documents go, flat (the ingest loader reads this folder non-recursively)")
+                    help="where the .txt documents go, flat (the ingest loader reads this folder non-recursively)")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--distractors", type=int, default=N_DISTRACTORS, help="documents besides the 80 gold ones (hard negatives included)")
+    ap.add_argument("--hard-negatives", type=int, default=0, help="how many of the distractors are the documents most similar to the gold ones")
     ap.add_argument("--force", action="store_true", help="overwrite a non-empty output folder and this script's earlier documents")
     args = ap.parse_args()
     for p in (args.train, args.corpus):
         if not p.exists():
             sys.exit(f"missing input: {p}")
 
-    result = build(args.train, args.corpus, args.seed)
+    if not 0 <= args.hard_negatives <= args.distractors:
+        sys.exit("--hard-negatives must be between 0 and --distractors")
+    result = build(args.train, args.corpus, args.seed, args.distractors, args.hard_negatives)
     check(result)
     write(result, args.out, args.docs_out, args.seed, args.force)
     print(f"wrote {args.out} and {len(result['contexts'])} documents to {args.docs_out}")
     for name, (a, i) in SPLITS.items():
         print(f"  {name}: {a} answerable + {i} impossible")
-    print(f"  contexts: 80 gold + {N_DISTRACTORS} distractors; dropped while cleaning: {result['dropped']}")
+    print(f"  contexts: {N_GOLD} gold + {args.distractors - args.hard_negatives} random distractors + {args.hard_negatives} hard negatives; "
+          f"dropped while cleaning: {result['dropped']}")
     print(f"  preview: {args.out / 'sample_preview.md'}")
 
 

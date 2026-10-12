@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import openpyxl
+import pandas as pd
 import pytest
 
 from rag.config import Settings
@@ -14,6 +15,8 @@ spec.loader.exec_module(exp)
 
 NOT_FOUND = "I could not find this in the provided documents."
 LONG = "x" * 3000
+SHEETS = ["summary_by_run", "per_question_results", "retrieval_details", "answer_details", "failure_analysis", "config",
+          "paired_comparison", "difficulty_check"]
 
 
 def chunk(doc, n=0, text="some passage text"):
@@ -71,7 +74,7 @@ def test_discovery_and_only_filter(runs):
 
 def test_sheets_columns_and_summary_values(runs):
     frames, raw = exp.build_report(runs, commit="abc1234")
-    assert list(frames) == ["summary_by_run", "per_question_results", "retrieval_details", "answer_details", "failure_analysis", "config"]
+    assert list(frames) == SHEETS
     assert list(frames["summary_by_run"].columns) == exp.SUMMARY_COLS
     assert list(frames["per_question_results"].columns) == exp.PER_QUESTION_COLS
     assert list(frames["retrieval_details"].columns) == exp.RETRIEVAL_COLS
@@ -126,7 +129,7 @@ def test_written_files_truncate_text_freeze_header_and_keep_raw(runs, tmp_path):
     assert {p.name for p in paths} == {"rag_ablation_report.xlsx", "per_question_results.csv", "failure_analysis.csv", "raw_results.jsonl"}
 
     wb = openpyxl.load_workbook(out / "rag_ablation_report.xlsx")
-    assert wb.sheetnames == ["summary_by_run", "per_question_results", "retrieval_details", "answer_details", "failure_analysis", "config"]
+    assert wb.sheetnames == SHEETS
     for ws in wb.worksheets:
         assert ws.freeze_panes == "A2" and ws.auto_filter.ref == ws.dimensions
         for r in ws.iter_rows(values_only=True):
@@ -159,6 +162,60 @@ def test_gold_ids_fall_back_to_source_and_stored_rank(tmp_path):
 def test_empty_runs_dir_exits_with_a_hint(tmp_path):
     with pytest.raises(SystemExit):
         exp.build_report(tmp_path, commit="")
+
+
+def test_wilson_interval_and_sign_test():
+    low, high = exp.wilson(45, 48)
+    assert low == pytest.approx(0.8316, abs=1e-3) and high == pytest.approx(0.9784, abs=1e-3)     # 1 question is ~2 points, the CI ~15
+    assert exp.wilson(48, 48)[1] == 1.0 and exp.wilson(0, 0) == (None, None)
+    assert exp.sign_test_p(0, 0) == 1.0 and exp.sign_test_p(3, 3) == 1.0
+    assert exp.sign_test_p(5, 0) == pytest.approx(0.0625) and exp.sign_test_p(0, 5) == pytest.approx(0.0625)
+    assert exp.sign_test_p(8, 2) == pytest.approx(0.1094, abs=1e-4)
+
+
+def test_paired_comparison_against_the_best_run_of_each_testset():
+    runs = [{"run_id": "a", "testset": "t", "mrr": 0.9, "hits": {"q1": (True, True), "q2": (True, True), "q3": (False, True)}},
+            {"run_id": "b", "testset": "t", "mrr": 0.7, "hits": {"q1": (False, True), "q2": (True, True), "q3": (True, False), "q4": (True, True)}},
+            {"run_id": "c", "testset": "other", "mrr": 0.5, "hits": {"q1": (True, True)}}]
+    rows = exp.paired_comparison(runs)
+    assert [(r["run_id"], r["reference_run"]) for r in rows] == [("b", "a")]          # 'other' has one run, so nothing to compare
+    b = rows[0]
+    assert b["n_paired"] == 3                                                         # q4 is not in the reference run
+    assert (b["hit1_wins"], b["hit1_losses"]) == (1, 1) and b["hit1_sign_test_p"] == 1.0
+    assert (b["hit5_wins"], b["hit5_losses"]) == (0, 1)
+
+
+def test_summary_has_confidence_interval_and_answer_text_recall(runs):
+    rows = [row("a", retrieved=[chunk("d1.txt")], rank=1, answer_rank=1), row("b", retrieved=[chunk("d9.txt"), chunk("d1.txt")], answer_rank=None),
+            row("c", retrieved=[chunk("d9.txt"), chunk("d1.txt")], answer_rank=2), row("d", answerable=False, gold=(), retrieved=[chunk("d1.txt")])]
+    write_run(runs / "extra", rows)
+    frames, _ = exp.build_report(runs, only="extra", commit="")
+    s = frames["summary_by_run"].iloc[0]
+    assert s["n_answerable"] == 3 and s["context_recall_at_1"] == pytest.approx(0.3333)
+    assert (s["recall_at_1_ci95_low"], s["recall_at_1_ci95_high"]) == exp.wilson(1, 3)
+    assert (s["answer_text_recall_at_1"], s["answer_text_recall_at_3"]) == (pytest.approx(0.3333), pytest.approx(0.6667))
+    pq = frames["per_question_results"].set_index("question_id")
+    assert pq.loc["c", "answer_text_rank"] == 2 and pd.isna(pq.loc["d", "answer_text_rank"])
+    old, _ = exp.build_report(runs, only="*512_fts*", commit="")                       # saved before answer_rank existed
+    assert pd.isna(old["summary_by_run"].iloc[0]["answer_text_recall_at_5"])
+
+
+def test_title_baseline_ranks_documents_by_words_shared_with_the_question(tmp_path):
+    folder = tmp_path / "tiny"
+    folder.mkdir()
+    docs = [{"context_id": "g1.txt", "role": "gold", "text": "Title: Oracle JDBC connectionProperties datasource\n\nbody"},
+            {"context_id": "g2.txt", "role": "gold", "text": "Title: Logout button disabled in Content Navigator\n\nbody"},
+            {"context_id": "x1.txt", "role": "distractor", "text": "Title: Install Datacap on Windows\n\nbody"},
+            {"context_id": "x2.txt", "role": "distractor", "text": "Title: Oracle upgrade\n\nbody"}]
+    (folder / "contexts.jsonl").write_text("\n".join(json.dumps(d) for d in docs), encoding="utf-8")
+    questions = {"q1": {"question": "How to set Oracle JDBC connectionProperties in a datasource?", "gold_context_ids": ["g1.txt"]},
+                 "q2": {"question": "Is the Logout button disabled?", "gold_context_ids": ["g2.txt"]},
+                 "q3": {"question": "Unrelated words entirely", "gold_context_ids": ["x1.txt"], "is_impossible": False},
+                 "q4": {"question": "Oracle", "gold_context_ids": [], "is_impossible": True}}
+    b = exp.title_baseline("tiny/dev", questions, folder / "contexts.jsonl")
+    assert b["n_answerable"] == 3 and b["n_documents"] == 4 and b["gold_share_of_documents"] == 0.5
+    assert b["context_recall_at_1"] == pytest.approx(0.6667) and b["context_recall_at_5"] == 1.0
+    assert exp.title_baseline("tiny/dev", questions, folder / "missing.jsonl") is None
 
 
 def test_citation_check():
