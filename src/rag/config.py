@@ -69,8 +69,9 @@ class Eval(BaseModel):
     judge_model: str = "gemini-3.5-flash-lite"
     judge_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
     judge_api_key_env: str = "GEMINI_API_KEY"
-    # Privacy: only items from this one document may be sent to a hosted judge (see run_eval.assert_hosted_safe).
-    judge_allowed_source: str = "VM0047-v1.1_Final.pdf"
+    # Privacy: if set, only items from this one document may be sent to a hosted judge (see run_eval.assert_hosted_safe).
+    # null = the corpus is public (e.g. TechQA, Apache-2.0), so nothing is restricted.
+    judge_allowed_source: str | None = None
     judge_max_workers: int = 2
     judge_reasoning_effort: str | None = "low"   # e.g. low / none: cuts latency of thinking models (Gemini); null = not sent
     judge_min_interval_s: float = 0.0   # minimum seconds between hosted-judge requests (0 = no throttle)
@@ -83,7 +84,7 @@ class Tracing(BaseModel):
     # If the server is not reachable, tracing is silently skipped for that process.
     enabled: bool = True
     endpoint: str = "http://localhost:6006/v1/traces"
-    project_name: str = "carbon-rag"
+    project_name: str = "techqa-rag"
 
 
 class Settings(BaseModel):

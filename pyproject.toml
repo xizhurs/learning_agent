@@ -23,6 +23,8 @@ dependencies = [
     "pytest",
     "arize-phoenix-otel>=0.17.2",
     "arize-phoenix-client>=3.5.0",
+    "pandas",                    # scripts/export_eval_report.py
+    "openpyxl",
 ]
 
 [build-system]

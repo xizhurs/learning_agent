@@ -1,6 +1,7 @@
-"""Parse PDF / DOCX into Docling documents, cached as JSON so re-chunking doesn't re-parse."""
+"""Parse PDF / DOCX (Docling, cached as JSON so re-chunking doesn't re-parse) and plain-text technotes into Docling documents."""
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -8,11 +9,12 @@ from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc import DoclingDocument
+from docling_core.types.doc.labels import DocItemLabel
 
 from rag.config import Settings
 from rag.ingest.docx_clean import accept_tracked_changes
 
-SUPPORTED = {".pdf", ".docx"}
+SUPPORTED = {".pdf", ".docx", ".txt"}
 
 
 def _converter() -> DocumentConverter:
@@ -29,8 +31,42 @@ def list_documents(settings: Settings) -> list[Path]:
     return sorted(p for p in docs_dir.iterdir() if p.suffix.lower() in SUPPORTED and not p.name.startswith("~$"))
 
 
+def parse_text_document(path: Path) -> DoclingDocument:
+    """Plain-text technote -> DoclingDocument: first 'Title: ...' line -> title, blank-line separated paragraphs -> text,
+    a bare 'Text:' line is dropped. The document is named after the file so chunk ids stay '<file name>::NNNNN'.
+
+    ALL-CAPS section labels (PROBLEM, CAUSE, '* PE', ...) are deliberately NOT turned into headings: the chunker starts a new
+    chunk at every heading, which cut the technotes into ~100-token fragments and made chunk size irrelevant."""
+    raw = path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    doc = DoclingDocument(name=path.name)
+    para: list[str] = []
+    titled = False
+
+    def flush() -> None:
+        if para:
+            doc.add_text(label=DocItemLabel.TEXT, text="\n".join(para))
+            para.clear()
+
+    for line in raw.split("\n"):
+        s = line.strip()
+        if not s:
+            flush()
+        elif s.startswith("Title:") and not titled:
+            flush()
+            doc.add_title(s.removeprefix("Title:").strip())
+            titled = True
+        elif s == "Text:":
+            flush()
+        else:
+            para.append(s)
+    flush()
+    return doc
+
+
 def parse_document(path: Path, settings: Settings, force: bool = False) -> DoclingDocument:
-    """Return the DoclingDocument for `path`, using data/processed/<name>.docling.json as a cache."""
+    """Return the DoclingDocument for `path`, using data/processed/<name>.docling.json as a cache (not used for .txt)."""
+    if path.suffix.lower() == ".txt":
+        return parse_text_document(path)
     processed = settings.paths.resolve("processed_dir")
     processed.mkdir(parents=True, exist_ok=True)
     cache = processed / f"{path.stem}.docling.json"

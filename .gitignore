@@ -7,6 +7,9 @@ __pycache__/
 # Documents (the PD draft is confidential), derived indexes and eval data (contain passages and answers from them) stay local
 data/
 
+# generated evaluation reports (Excel / CSV / JSONL exports)
+outputs/
+
 # secrets
 .env
 .env.*

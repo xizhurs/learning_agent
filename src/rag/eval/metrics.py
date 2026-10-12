@@ -40,6 +40,17 @@ def first_hit_rank(quote: str, chunk_texts: list[str], threshold: float) -> int 
     return None
 
 
+def first_doc_rank(gold_ids: list[str], chunk_ids: list[str]) -> int | None:
+    """1-based rank of the first retrieved chunk that comes from a gold document (chunk ids are '<document>::NNNNN').
+
+    A document-level hit does not depend on chunk size or on how much of the answer a chunk covers."""
+    gold = set(gold_ids)
+    for i, cid in enumerate(chunk_ids, 1):
+        if cid.split("::")[0] in gold:
+            return i
+    return None
+
+
 def retrieval_summary(ranks: list[int | None], ks: list[int]) -> dict:
     n = len(ranks)
     out = {f"hit@{k}": sum(r is not None and r <= k for r in ranks) / n for k in ks} if n else {}

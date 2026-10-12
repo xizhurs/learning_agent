@@ -1,14 +1,18 @@
 """Run the pipeline over the test set and score it (retrieval metrics + refusal rates; answer quality is judged manually in the Claude app).
 
   python -m rag.eval.run_eval run [--tag baseline] [--limit 20] [--retrieval-only] [--ragas] [--testset testset_holdout]
+  python -m rag.eval.run_eval score-ragas --run <run or ablation dir>   # RAGAS on saved rows (needs the judge key in the env)
   python -m rag.eval.run_eval check-judge                             # verify hosted-judge key / model / rate limit
   python -m rag.eval.run_eval export-judge --run <run_dir> [--n 20]   # packet for manual judging in the Claude app
   python -m rag.eval.run_eval import-judge --run <run_dir>            # reads <run_dir>/judge_reply.json
 
 Outputs go to data/eval/runs/<timestamp>_<tag>_<testset>/ : config.json, items.jsonl, summary.json
 --testset defaults to the dev set (testset); tune on it, and run the holdout (testset_holdout) only on the final config.
---ragas runs are restricted to eval.judge_allowed_source: only that document's single-passage questions are run, retrieval is
-filtered to that document, and assert_hosted_safe() refuses to send anything else to a hosted judge.
+--testset may be a sub-path, e.g. techqa_tiny/dev (rows {id, question, answer, is_impossible, gold_context_ids} are normalised by
+normalize_item; `rank` is then a document-level hit and `answer_rank` the answer-text hit).
+If eval.judge_allowed_source is set, --ragas runs are restricted to that document's single-passage questions, retrieval is
+filtered to that document, and assert_hosted_safe() refuses to send anything else to a hosted judge. If it is null (public
+corpus such as TechQA) nothing is restricted.
 """
 from __future__ import annotations
 
@@ -20,18 +24,34 @@ import time
 from pathlib import Path
 
 from rag.config import Settings, get_settings
-from rag.eval.metrics import first_hit_rank, is_refusal, latency_summary, retrieval_summary, spearman
+from rag.eval.metrics import first_doc_rank, first_hit_rank, is_refusal, latency_summary, retrieval_summary, spearman
 from rag.generate import build_messages, generate
 from rag.ingest.build import ensure_table
 from rag.retrieve import retrieve
 from rag.tracing import annotate, enabled as tracing_enabled, flush as flush_traces, start_trace
 
 
+def slugify_testset(name: str) -> str:
+    """Testset name usable inside a folder name ('techqa_tiny/dev' -> 'techqa_tiny_dev')."""
+    return re.sub(r"[\\/]+", "_", name)
+
+
+def normalize_item(item: dict) -> dict:
+    """TechQA-style rows {id, question, answer, is_impossible, gold_context_ids} -> the runner schema; other rows pass through."""
+    if "is_impossible" not in item or "reference_answer" in item:
+        return item
+    answerable = not item["is_impossible"]
+    gold = list(item.get("gold_context_ids") or [])
+    answer = item["answer"] if answerable else ""
+    return {**item, "type": "factual", "answerable": answerable, "source": gold[0] if gold else "",
+            "reference_answer": answer, "reference_quote": answer, "gold_context_ids": gold}
+
+
 def load_testset(settings: Settings, name: str = "testset") -> list[dict]:
     path = settings.paths.resolve("eval_dir") / f"{name}.jsonl"
     if not path.exists():
         raise SystemExit(f"{path} not found - run: python -m rag.eval.gen_testset export / import")
-    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    return [normalize_item(json.loads(l)) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
 def run_items(testset: list[dict], settings: Settings, generate_answers: bool, limit: int | None = None,
@@ -45,20 +65,27 @@ def run_items(testset: list[dict], settings: Settings, generate_answers: bool, l
         root = start_trace(
             settings, "eval.question", input=item["question"], session_id=session_id,
             **{"rag__kind": "eval", "eval__id": item["id"], "eval__type": item["type"], "eval__answerable": item["answerable"],
-               "eval__source": item.get("source", ""), "eval__reference_answer": item["reference_answer"],
+               "eval__source": item.get("source", ""), "eval__gold_context_ids": ", ".join(item.get("gold_context_ids", [])),
+               "eval__reference_answer": item["reference_answer"],
                "eval__reference_quote": item["reference_quote"], "rag__generation_model": settings.generation.model,
                "retrieval__mode": settings.retrieval.mode, "retrieval__top_k": settings.retrieval.top_k,
                "rerank__enabled": settings.rerank.enabled, "rag__chunk_max_tokens": settings.chunking.max_tokens})
         hits = retrieve(item["question"], settings, table, root)
         row = {
             "id": item["id"], "question": item["question"], "type": item["type"], "answerable": item["answerable"],
-            "source": item.get("source", ""),
+            "source": item.get("source", ""), "gold_context_ids": item.get("gold_context_ids", []),
             "reference_answer": item["reference_answer"], "reference_quote": item["reference_quote"],
             "retrieved": [{"id": h.id, "citation": h.citation(), "score": h.score, "text": h.text} for h in hits],
             "rank": None, "answer": None,
         }
         if item["answerable"]:
-            row["rank"] = first_hit_rank(item["reference_quote"], [h.text for h in hits], settings.eval.overlap_threshold)
+            quote_rank = first_hit_rank(item["reference_quote"], [h.text for h in hits], settings.eval.overlap_threshold)
+            if row["gold_context_ids"]:
+                # gold unit is a whole document: `rank` = first chunk from a gold document; the answer-quote rank is kept alongside
+                row["rank"] = first_doc_rank(row["gold_context_ids"], [h.id for h in hits])
+                row["answer_rank"] = quote_rank
+            else:
+                row["rank"] = quote_rank
         if generate_answers:
             if hits or not settings.generation.refuse_if_no_context:
                 row["answer"] = generate(build_messages(item["question"], hits), settings.generation, root)
@@ -78,6 +105,10 @@ def run_items(testset: list[dict], settings: Settings, generate_answers: bool, l
 def summarise(rows: list[dict], settings: Settings) -> dict:
     answerable = [r for r in rows if r["answerable"]]
     summary = retrieval_summary([r["rank"] for r in answerable], settings.eval.hit_ks)
+    if any("answer_rank" in r for r in answerable):
+        # document-level hit@k / mrr above; the same ranks judged by whether the chunk actually contains the answer text
+        by_answer = retrieval_summary([r.get("answer_rank") for r in answerable], settings.eval.hit_ks)
+        summary |= {f"answer_{k}": v for k, v in by_answer.items() if k != "n_answerable"}
     if rows and rows[0]["answer"] is not None:
         unans = [r for r in rows if not r["answerable"]]
         summary["refusal_rate_on_unanswerable"] = (
@@ -94,20 +125,25 @@ class PrivacyError(RuntimeError):
     """Raised instead of sending non-allowed document text to a hosted judge."""
 
 
-def judge_eligible(item: dict, allowed_source: str) -> bool:
+def judge_eligible(item: dict, allowed_source: str | None) -> bool:
     """Single-passage, answerable item whose supporting passage comes from the allowed document.
 
     multi_passage items are excluded: only the first passage's source is recorded, so a second passage
     (and hence the reference answer) could come from another document.
+    allowed_source=None means the corpus is public (no per-document restriction): any answerable single-passage item.
     """
-    return bool(item.get("answerable")) and item.get("type") != "multi_passage" and item.get("source") == allowed_source
+    if not item.get("answerable") or item.get("type") == "multi_passage":
+        return False
+    return allowed_source is None or item.get("source") == allowed_source
 
 
-def assert_hosted_safe(rows: list[dict], allowed_source: str) -> None:
-    """Hard check run right before anything is sent to a hosted judge."""
+def assert_hosted_safe(rows: list[dict], allowed_source: str | None) -> None:
+    """Hard check run right before anything is sent to a hosted judge (a no-op restriction when allowed_source is None)."""
     for r in rows:
         if not judge_eligible(r, allowed_source):
             raise PrivacyError(f"{r['id']}: item is not eligible for the hosted judge (source={r.get('source')!r})")
+        if allowed_source is None:
+            continue
         for h in r["retrieved"]:
             doc = h["id"].split("::")[0]
             if doc != allowed_source:
@@ -305,6 +341,40 @@ def save_run(tag: str, settings: Settings, rows: list[dict], summary: dict, name
     return run_dir
 
 
+def apply_judge_scope(testset: list[dict], settings: Settings) -> tuple[list[dict], dict]:
+    """Hosted-judge scope: only the allowed document's single-passage answerable items, retrieval filtered to that document.
+
+    With judge_allowed_source=None (public corpus) nothing is restricted: all items are kept (unanswerable ones are still
+    needed for the refusal rate; RAGAS only scores the answerable rows) and retrieval is not filtered.
+    Mutates settings.retrieval.source_filter. Returns (items, summary_extra)."""
+    allowed = settings.eval.judge_allowed_source
+    if allowed is None:
+        return list(testset), {"ragas_scope": "unrestricted"}
+    items = [i for i in testset if judge_eligible(i, allowed)]
+    settings.retrieval.source_filter = allowed
+    return items, {"ragas_scope": allowed,
+                   "note": "retrieval filtered to the allowed document; not comparable with all-documents runs"}
+
+
+def format_table(results: list[tuple[str, dict]]) -> str:
+    """Comparison table (best MRR first): retrieval, RAGAS (when scored), refusal and latency columns."""
+    cols = [("mrr", "mrr"), ("hit@1", "hit@1"), ("hit@3", "hit@3"), ("hit@5", "hit@5"), ("answer_mrr", "ans_mrr"),
+            ("answer_hit@5", "ans_hit@5"), ("faithfulness", "faith"), ("answer_relevancy", "relev"), ("llm_context_precision_with_reference", "ctx_prec"),
+            ("context_recall", "ctx_rec"), ("factual_correctness(mode=f1)", "fact_corr"),
+            ("false_refusal_rate_on_answerable", "false_ref")]
+    cols = [(k, h) for k, h in cols if any(isinstance(s.get(k), float) for _, s in results)]
+    lat = lambda s, step: (s.get("latency_s", {}).get(step) or {}).get("median")
+    header = ["variant".ljust(40)] + [h.rjust(9) for _, h in cols] + ["gen_s".rjust(7), "total_s".rjust(8), "sec".rjust(6)]
+    lines = [" | ".join(header)]
+    for label, s in sorted(results, key=lambda r: -(r[1].get("mrr") or 0)):
+        cells = [(f"{s[k]:.3f}" if isinstance(s.get(k), float) else "-").rjust(9) for k, _ in cols]
+        g, t = lat(s, "generate"), lat(s, "total")
+        lines.append(" | ".join([label.ljust(40)] + cells + [(f"{g:.1f}" if g is not None else "-").rjust(7),
+                                                              (f"{t:.1f}" if t is not None else "-").rjust(8),
+                                                              str(s.get("seconds", "-")).rjust(6)]))
+    return "\n".join(lines)
+
+
 def ragas_annotations(rows: list[dict]) -> list[dict]:
     return [{"span_id": r["span_id"], "name": f"ragas.{k}", "score": v, "kind": "LLM"}
             for r in rows if r.get("span_id") and r.get("ragas") for k, v in r["ragas"].items() if v is not None]
@@ -327,22 +397,22 @@ def cmd_run(args) -> None:
     settings = get_settings()
     testset = load_testset(settings, args.testset)
     summary_extra: dict = {}
-    if args.ragas and not args.retrieval_only and settings.eval.judge_provider != "ollama":
+    if (args.ragas or args.judge_scope) and not args.retrieval_only and settings.eval.judge_provider != "ollama":
         # Hosted judge: run only the allowed document's single-passage questions, with retrieval limited to that document.
-        allowed = settings.eval.judge_allowed_source
-        testset = [i for i in testset if judge_eligible(i, allowed)]
-        settings.retrieval.source_filter = allowed
-        summary_extra = {"ragas_scope": allowed,
-                         "note": "retrieval filtered to the allowed document; not comparable with all-documents runs"}
-        print(f"hosted judge: {len(testset)} eligible items from {allowed}; retrieval filtered to that document")
-    run_name = run_name_for(f"{args.tag}_{args.testset}")
+        testset, summary_extra = apply_judge_scope(testset, settings)
+        if settings.eval.judge_allowed_source:
+            print(f"hosted-judge scope: {len(testset)} eligible items from {settings.eval.judge_allowed_source}; "
+                  f"retrieval filtered to that document")
+        else:
+            print(f"hosted-judge scope: unrestricted (public corpus), {len(testset)} items")
+    run_name = run_name_for(f"{args.tag}_{slugify_testset(args.testset)}")
     rows = run_items(testset, settings, generate_answers=not args.retrieval_only, limit=args.limit, session_id=run_name)
     summary = {"testset": args.testset} | summary_extra | summarise(rows, settings)
     if args.ragas and not args.retrieval_only:
         t0 = time.time()
         summary |= ragas_scores(rows, settings)
         summary["ragas_seconds"] = round(time.time() - t0)
-    run_dir = save_run(f"{args.tag}_{args.testset}", settings, rows, summary, name=run_name)
+    run_dir = save_run(f"{args.tag}_{slugify_testset(args.testset)}", settings, rows, summary, name=run_name)
     flush_traces()
     if tracing_enabled():
         sent = annotate(settings, ragas_annotations(rows))
@@ -353,8 +423,38 @@ def cmd_run(args) -> None:
     print("saved to", run_dir)
 
 
+def cmd_score_ragas(args) -> None:
+    """Score saved rows with RAGAS (hosted judge, key from the env var). Works on one run folder or an ablation folder of variants."""
+    settings = get_settings()
+    root = Path(args.run)
+    dirs = [root] if (root / "items.jsonl").exists() else sorted(d for d in root.iterdir() if (d / "items.jsonl").exists())
+    if not dirs:
+        raise SystemExit(f"no items.jsonl found under {root}")
+    results = []
+    for d in dirs:
+        rows = [json.loads(l) for l in (d / "items.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+        summary = json.loads((d / "summary.json").read_text(encoding="utf-8"))
+        run_settings = Settings.model_validate_json((d / "config.json").read_text(encoding="utf-8")) \
+            if (d / "config.json").exists() else settings
+        run_settings.eval = settings.eval          # judge settings come from the current config; the key is read from the env
+        print(f"scoring {d.name}: {sum(1 for r in rows if r['answerable'] and r['answer'] is not None)} answered items")
+        t0 = time.time()
+        summary |= ragas_scores(rows, run_settings)
+        summary["ragas_seconds"] = round(time.time() - t0)
+        (d / "items.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+        (d / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        sent = annotate(settings, ragas_annotations(rows))
+        if sent:
+            print(f"  {sent} annotations sent to Phoenix")
+        results.append((summary.get("variant", d.name), summary))
+    if len(dirs) > 1:
+        (root / "ablation.json").write_text(
+            json.dumps([{"variant": s, "summary": m} for s, m in results], indent=2), encoding="utf-8")
+    print("\n" + format_table(results))
+
+
 JUDGE_PROMPT = """\
-You are grading answers from a question-answering system over carbon-credit methodology documents.
+You are grading answers from a question-answering system over technical support documents.
 For each item below, score from 1 (worst) to 5 (best), using ONLY the retrieved contexts and the reference answer:
 - faithfulness: every claim in the answer is supported by the retrieved contexts (no invented facts)
 - correctness: the answer agrees with the reference answer (for unanswerable items, 5 = correctly says it cannot find the answer)
@@ -416,10 +516,14 @@ def main() -> None:
     r.add_argument("--tag", default="run")
     r.add_argument("--limit", type=int)
     r.add_argument("--ragas", action="store_true", help="also score answers with RAGAS (hosted judge; restricts the run to eval.judge_allowed_source)")
+    r.add_argument("--judge-scope", action="store_true",
+                   help="restrict to eval.judge_allowed_source single-passage items with retrieval filtered to it (no judge call; score later with score-ragas)")
     r.add_argument("--retrieval-only", action="store_true", help="skip answer generation (fast, no LLM)")
     r.add_argument("--testset", default="testset",
                    help="data/eval/<name>.jsonl: testset (dev, default) or testset_holdout (final check only)")
     sub.add_parser("check-judge")
+    sp = sub.add_parser("score-ragas")
+    sp.add_argument("--run", required=True, help="a run folder, or an ablation folder containing variant subfolders")
     for name in ("export-judge", "import-judge"):
         p = sub.add_parser(name)
         p.add_argument("--run", required=True)
@@ -427,7 +531,7 @@ def main() -> None:
             p.add_argument("--n", type=int, default=20)
     args = ap.parse_args()
     {"run": cmd_run, "export-judge": cmd_export_judge, "import-judge": cmd_import_judge,
-     "check-judge": cmd_check_judge}[args.cmd](args)
+     "check-judge": cmd_check_judge, "score-ragas": cmd_score_ragas}[args.cmd](args)
 
 
 if __name__ == "__main__":
