@@ -1,7 +1,8 @@
 """Run the pipeline over the test set and score it (retrieval metrics + refusal rates; answer quality is judged manually in the Claude app).
 
   python -m rag.eval.run_eval run [--tag baseline] [--limit 20] [--retrieval-only] [--ragas] [--testset testset_holdout]
-  python -m rag.eval.run_eval score-ragas --run <run or ablation dir>   # RAGAS on saved rows (needs the judge key in the env)
+  python -m rag.eval.run_eval run --reuse-retrieval <run dir> ...      # generation only: reuse that run's saved retrieved chunks
+  python -m rag.eval.run_eval score-ragas --run <run or ablation dir> [--metrics a,b]   # RAGAS on saved rows (needs the judge key in the env)
   python -m rag.eval.run_eval check-judge                             # verify hosted-judge key / model / rate limit
   python -m rag.eval.run_eval export-judge --run <run_dir> [--n 20]   # packet for manual judging in the Claude app
   python -m rag.eval.run_eval import-judge --run <run_dir>            # reads <run_dir>/judge_reply.json
@@ -21,6 +22,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from rag.config import Settings, get_settings
@@ -57,10 +59,31 @@ def load_testset(settings: Settings, name: str = "testset") -> list[dict]:
     return [normalize_item(json.loads(l)) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
+@dataclass
+class SavedHit:
+    """A retrieved chunk read back from a saved run's items.jsonl: just what the prompt and the rows need."""
+    id: str
+    score: float
+    text: str
+    cite: str
+
+    def citation(self) -> str:
+        return self.cite
+
+
+def load_saved_retrieval(run_dir: Path) -> dict[str, list[SavedHit]]:
+    """question id -> the chunks a previous run retrieved (same order), for generation-only runs."""
+    rows = (json.loads(l) for l in (run_dir / "items.jsonl").read_text(encoding="utf-8").splitlines() if l.strip())
+    return {r["id"]: [SavedHit(h["id"], h["score"], h["text"], h["citation"]) for h in r["retrieved"]] for r in rows}
+
+
 def run_items(testset: list[dict], settings: Settings, generate_answers: bool, limit: int | None = None,
-              session_id: str | None = None) -> list[dict]:
-    """One trace per question (Phoenix session = session_id). Ground truth is attached to the trace as eval.* attributes."""
-    table = ensure_table(settings)
+              session_id: str | None = None, saved_retrieval: dict[str, list[SavedHit]] | None = None) -> list[dict]:
+    """One trace per question (Phoenix session = session_id). Ground truth is attached to the trace as eval.* attributes.
+
+    With `saved_retrieval` (question id -> chunks) the search / rerank is skipped and those chunks are used, so only the
+    generation step changes between two runs (a prompt comparison on identical context)."""
+    table = None if saved_retrieval is not None else ensure_table(settings)
     rows = []
     items = testset[:limit] if limit else testset
     for n, item in enumerate(items, 1):
@@ -73,7 +96,12 @@ def run_items(testset: list[dict], settings: Settings, generate_answers: bool, l
                "eval__reference_quote": item["reference_quote"], "rag__generation_model": settings.generation.model,
                "retrieval__mode": settings.retrieval.mode, "retrieval__top_k": settings.retrieval.top_k,
                "rerank__enabled": settings.rerank.enabled, "rag__chunk_max_tokens": settings.chunking.max_tokens})
-        hits = retrieve(item["question"], settings, table, root)
+        if saved_retrieval is not None:
+            if item["id"] not in saved_retrieval:
+                raise SystemExit(f"--reuse-retrieval: question {item['id']} is not in the saved run")
+            hits = saved_retrieval[item["id"]]
+        else:
+            hits = retrieve(item["question"], settings, table, root)
         row = {
             "id": item["id"], "question": item["question"], "type": item["type"], "answerable": item["answerable"],
             "source": item.get("source", ""), "gold_context_ids": item.get("gold_context_ids", []),
@@ -315,15 +343,30 @@ def cmd_check_judge(args) -> None:
     print("free-tier quotas are per model; see aistudio.google.com/rate-limit")
 
 
-def ragas_scores(rows: list[dict], settings: Settings) -> dict:
-    """RAGAS metrics for answerable items. With a hosted judge, assert_hosted_safe() runs first."""
+# Binary RAGAS verdict used for answer correctness. FactualCorrectness (F1 or recall) scores ~0 for one-word / list references
+# such as "Yes" or "62": the reference has no claims to decompose and a long answer has many extra ones. A piloted check on 32
+# QASPER answers: F1 rated 3 correct, recall mode 5, this critic 21 (our token-recall cross-check: 23), and it still fails real misses.
+ANSWER_MATCHES_REFERENCE = {
+    "name": "answer_matches_reference",
+    "definition": ("Does the response give the same answer as the reference answer? Ignore extra explanation, citations like [1], "
+                   "and extra detail. For a yes/no question the response must give the same yes/no. For a list, the response "
+                   "must include the listed items."),
+}
+
+
+def ragas_scores(rows: list[dict], settings: Settings, only: set[str] | None = None) -> dict:
+    """RAGAS metrics for answerable items. With a hosted judge, assert_hosted_safe() runs first.
+
+    `only` (metric names, e.g. {"faithfulness", "answer_matches_reference"}) scores just those metrics. New scores are merged into
+    each row's existing `ragas` dict, and a job that failed (NaN) never overwrites a score already saved, so a partial or
+    quota-limited run can be completed later."""
     import warnings
 
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     from langchain_ollama import OllamaEmbeddings
     from ragas import EvaluationDataset, evaluate
     from ragas.embeddings import LangchainEmbeddingsWrapper
-    from ragas.metrics import (Faithfulness, FactualCorrectness, LLMContextPrecisionWithReference,
+    from ragas.metrics import (AspectCritic, Faithfulness, FactualCorrectness, LLMContextPrecisionWithReference,
                                LLMContextRecall, ResponseRelevancy)
     from ragas.run_config import RunConfig
 
@@ -335,16 +378,29 @@ def ragas_scores(rows: list[dict], settings: Settings) -> dict:
          "response": r["answer"], "reference": r["reference_answer"]} for r in ans])
     llm = build_judge_llm(settings)
     emb = LangchainEmbeddingsWrapper(OllamaEmbeddings(model=settings.embedding.model))
+    metrics = [Faithfulness(), ResponseRelevancy(), LLMContextPrecisionWithReference(), LLMContextRecall(),
+               FactualCorrectness(), AspectCritic(**ANSWER_MATCHES_REFERENCE)]
+    if only:
+        wanted = {n.replace("(mode=f1)", "") for n in only}
+        unknown = wanted - {m.name for m in metrics}
+        if unknown:
+            raise SystemExit(f"unknown RAGAS metric(s) {sorted(unknown)}; choose from {[m.name for m in metrics]}")
+        metrics = [m for m in metrics if m.name in wanted]
     result = evaluate(
-        data, metrics=[Faithfulness(), ResponseRelevancy(), LLMContextPrecisionWithReference(),
-                       LLMContextRecall(), FactualCorrectness()],
+        data, metrics=metrics,
         llm=llm, embeddings=emb, run_config=RunConfig(timeout=600, max_workers=settings.eval.judge_max_workers, max_retries=10, max_wait=60),
         raise_exceptions=False)
     df = result.to_pandas()
     metric_cols = [c for c in df.columns if c not in ("user_input", "retrieved_contexts", "response", "reference")]
     for r, (_, d) in zip(ans, df.iterrows()):
-        r["ragas"] = {c: (None if d[c] != d[c] else float(d[c])) for c in metric_cols}   # NaN -> None
-    return {c: float(df[c].mean(skipna=True)) for c in metric_cols} | {"ragas_n": len(ans)}
+        new = {c: (None if d[c] != d[c] else float(d[c])) for c in metric_cols}            # NaN -> None
+        old = r.get("ragas") or {}
+        r["ragas"] = old | {c: v for c, v in new.items() if v is not None or old.get(c) is None}
+    means = {}
+    for c in metric_cols:
+        vals = [r["ragas"][c] for r in ans if r["ragas"].get(c) is not None]
+        means[c] = sum(vals) / len(vals) if vals else float("nan")
+    return means | {"ragas_n": len(ans)}
 
 
 def run_name_for(tag: str) -> str:
@@ -427,7 +483,9 @@ def cmd_run(args) -> None:
         else:
             print(f"hosted-judge scope: unrestricted (public corpus), {len(testset)} items")
     run_name = run_name_for(f"{args.tag}_{slugify_testset(args.testset)}")
-    rows = run_items(testset, settings, generate_answers=not args.retrieval_only, limit=args.limit, session_id=run_name)
+    saved = load_saved_retrieval(Path(args.reuse_retrieval)) if args.reuse_retrieval else None
+    rows = run_items(testset, settings, generate_answers=not args.retrieval_only, limit=args.limit, session_id=run_name,
+                     saved_retrieval=saved)
     summary = {"testset": args.testset} | summary_extra | summarise(rows, settings)
     if args.ragas and not args.retrieval_only:
         t0 = time.time()
@@ -460,7 +518,7 @@ def cmd_score_ragas(args) -> None:
         run_settings.eval = settings.eval          # judge settings come from the current config; the key is read from the env
         print(f"scoring {d.name}: {sum(1 for r in rows if r['answerable'] and r['answer'] is not None)} answered items")
         t0 = time.time()
-        summary |= ragas_scores(rows, run_settings)
+        summary |= ragas_scores(rows, run_settings, only=set(args.metrics.split(",")) if getattr(args, "metrics", None) else None)
         summary["ragas_seconds"] = round(time.time() - t0)
         (d / "items.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
         (d / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -540,11 +598,15 @@ def main() -> None:
     r.add_argument("--judge-scope", action="store_true",
                    help="restrict to eval.judge_allowed_source single-passage items with retrieval filtered to it (no judge call; score later with score-ragas)")
     r.add_argument("--retrieval-only", action="store_true", help="skip answer generation (fast, no LLM)")
+    r.add_argument("--reuse-retrieval", metavar="RUN_DIR",
+                   help="generation only: use the retrieved chunks saved in that run (same testset) instead of searching and reranking")
     r.add_argument("--testset", default="testset",
                    help="data/eval/<name>.jsonl: testset (dev, default) or testset_holdout (final check only)")
     sub.add_parser("check-judge")
     sp = sub.add_parser("score-ragas")
     sp.add_argument("--run", required=True, help="a run folder, or an ablation folder containing variant subfolders")
+    sp.add_argument("--metrics", help="comma-separated subset to score, e.g. faithfulness,answer_relevancy,factual_correctness,"
+                                      "answer_matches_reference (default: all); scores already saved are kept and completed")
     for name in ("export-judge", "import-judge"):
         p = sub.add_parser(name)
         p.add_argument("--run", required=True)

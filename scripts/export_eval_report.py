@@ -18,9 +18,13 @@ How the derived columns are defined:
                           Gold ids come from the row, else from the test-set file named in summary.json, else from the row's `source`.
                           Rows without gold ids fall back to the stored answer-quote `rank` (summary column recall_basis says which).
   answer_correct          unanswerable question: the model refused (rag.eval.metrics.is_refusal). Answerable: a refusal is wrong; otherwise
-                          Claude-app judge correctness >= 4 (judge_reply.json in the run folder) or RAGAS factual_correctness(mode=f1) >=
-                          --correct-threshold; empty if the answer was not scored.
-  answer_score            0-1: RAGAS factual_correctness, or (Claude correctness - 1) / 4
+                          Claude-app judge correctness >= 4 (judge_reply.json in the run folder), else the RAGAS critic
+                          answer_matches_reference >= --correct-threshold, else (runs scored before the critic existed) RAGAS
+                          factual_correctness(mode=f1) >= --correct-threshold. That F1 metric scores ~0 for one-word / list references
+                          even when the answer is right, hence only the fallback. Empty if the answer was not scored.
+  correct_source          where the verdict came from: refusal | claude | ragas | ragas_factual_correctness
+  ragas_*                 every column starting with `ragas_` is a RAGAS score (judge LLM); everything else is computed here or saved by
+                          run_eval from our own deterministic metrics. claude_correctness_score is (Claude-app correctness - 1) / 4.
   citation_correct        heuristic, answerable non-refusal answers only: every [n] is within the retrieved list and one cites a gold document
   failure_type            first match of: retrieval_miss, false_refusal, missed_refusal, wrong_answer, low_faithfulness, bad_citation,
                           late_hit (gold document first at rank > 3). Any further problems are listed in `notes`.
@@ -69,18 +73,32 @@ ROOT = Path(__file__).resolve().parent.parent
 EXCEL_MAX_CHARS = 1000
 CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 FACT_CORRECTNESS = "factual_correctness(mode=f1)"
+ANSWER_MATCH = "answer_matches_reference"
+# RAGAS keys in a saved row's `ragas` dict -> report column. Every RAGAS-derived column starts with `ragas_`; the rest are our own metrics.
+RAGAS_COLS = {"faithfulness": "ragas_faithfulness", ANSWER_MATCH: "ragas_answer_matches_reference",
+              FACT_CORRECTNESS: "ragas_factual_correctness", "answer_relevancy": "ragas_answer_relevancy",
+              "context_recall": "ragas_context_recall", "llm_context_precision_with_reference": "ragas_context_precision"}
 
 SUMMARY_COLS = ["run_id", "retriever_type", "chunk_size", "chunk_overlap", "top_k", "reranker", "query_rewrite", "num_questions",
-                "context_recall_at_1", "context_recall_at_3", "context_recall_at_5", "mrr", "answer_accuracy", "faithfulness_avg",
-                "not_found_accuracy", "avg_latency_sec", "avg_prompt_tokens", "avg_completion_tokens", "estimated_cost", "recall_basis",
-                "n_answerable", "recall_at_1_ci95_low", "recall_at_1_ci95_high", "answer_text_recall_at_1", "answer_text_recall_at_3",
-                "answer_text_recall_at_5", "answer_mrr", "evidence_recall_at_1", "evidence_recall_at_3", "evidence_recall_at_5",
-                "context_precision", "answer_f1", "answer_token_recall", "refusal_rate_on_unanswerable",
-                "false_refusal_rate_on_answerable", "ragas_answer_relevancy", "ragas_context_recall", "ragas_context_precision",
-                "ragas_factual_correctness", "ragas_n", "median_retrieve_sec", "median_rerank_sec", "median_generate_sec"]
+                "n_answerable",
+                # RAGAS (judge LLM)
+                "ragas_faithfulness", "ragas_answer_matches_reference", "ragas_factual_correctness", "ragas_answer_relevancy",
+                "ragas_context_recall", "ragas_context_precision", "ragas_n",
+                # ours: answers and refusals
+                "answer_accuracy", "not_found_accuracy", "refusal_rate_on_unanswerable", "false_refusal_rate_on_answerable",
+                "answer_f1", "answer_token_recall",
+                # ours: retrieval against the annotators' evidence text
+                "answer_mrr", "answer_text_recall_at_1", "answer_text_recall_at_3", "answer_text_recall_at_5",
+                "evidence_recall_at_1", "evidence_recall_at_3", "evidence_recall_at_5", "context_precision",
+                # ours: document level (trivially ~1.0 on QASPER) and cost
+                "context_recall_at_1", "context_recall_at_3", "context_recall_at_5", "mrr", "recall_at_1_ci95_low",
+                "recall_at_1_ci95_high", "recall_basis", "avg_latency_sec", "median_retrieve_sec", "median_rerank_sec",
+                "median_generate_sec", "avg_prompt_tokens", "avg_completion_tokens", "estimated_cost"]
 PER_QUESTION_COLS = ["run_id", "question_id", "split", "question", "is_impossible", "gold_answer", "gold_context_ids",
                      "retrieved_context_ids", "retrieved_chunk_ids", "gold_context_hit_at_1", "gold_context_hit_at_3",
-                     "gold_context_hit_at_5", "gold_context_rank", "generated_answer", "answer_correct", "faithfulness_score",
+                     "gold_context_hit_at_5", "gold_context_rank", "generated_answer", "answer_correct", "correct_source",
+                     "ragas_faithfulness", "ragas_answer_matches_reference", "ragas_factual_correctness", "ragas_answer_relevancy",
+                     "ragas_context_recall", "ragas_context_precision", "claude_correctness_score",
                      "citation_correct", "failure_type", "notes", "answer_text_rank", "evidence_recall_at_1", "evidence_recall_at_3",
                      "evidence_recall_at_5", "context_precision", "answer_f1", "answer_token_recall"]
 PAIRED_COLS = ["run_id", "testset", "reference_run", "n_paired", "hit1_wins", "hit1_losses", "hit1_sign_test_p",
@@ -91,7 +109,7 @@ STOPWORDS = set("the a an to of in is are for and or with on how do does can wha
                 "our when".split())
 RETRIEVAL_COLS = ["run_id", "question_id", "rank", "chunk_id", "context_id", "source", "score", "is_gold_context", "chunk_text_preview"]
 ANSWER_COLS = ["run_id", "question_id", "question", "gold_answer", "generated_answer", "retrieved_context_preview", "judge_explanation",
-               "faithfulness_score", "answer_score"]
+               "ragas_faithfulness", "ragas_answer_matches_reference", "ragas_factual_correctness", "claude_correctness_score"]
 FAILURE_COLS = ["run_id", "question_id", "question", "failure_type", "gold_answer", "generated_answer", "gold_context_ids",
                 "retrieved_context_ids", "diagnosis", "suggested_fix"]
 CONFIG_COLS = ["run_id", "embedding_model", "llm_model", "retriever_type", "chunking_strategy", "chunk_size", "chunk_overlap", "top_k",
@@ -215,7 +233,7 @@ def classify(d: dict, faithfulness_threshold: float) -> tuple[str, list[str]]:
             flags.append("false_refusal")
         if answered and rank is not None and not is_refusal(d["generated_answer"]) and d["answer_correct"] is False:
             flags.append("wrong_answer")
-        if answered and d["faithfulness_score"] is not None and d["faithfulness_score"] < faithfulness_threshold:
+        if answered and d["ragas_faithfulness"] is not None and d["ragas_faithfulness"] < faithfulness_threshold:
             flags.append("low_faithfulness")
         if d["citation_correct"] is False:
             flags.append("bad_citation")
@@ -233,9 +251,12 @@ def diagnose(d: dict, failure_type: str, faithfulness_threshold: float) -> str:
         "false_refusal": f"The gold document was retrieved at rank {rank}, but the model answered with the not-found sentence.",
         "missed_refusal": "The question has no answer in the corpus, but the model gave an answer instead of the not-found sentence.",
         "wrong_answer": f"The gold document was retrieved at rank {rank}, but the answer does not agree with the reference answer"
-                        + (f" (answer_score {d['answer_score']:.2f})." if d.get("answer_score") is not None else "."),
-        "low_faithfulness": f"Faithfulness {d['faithfulness_score']:.2f} is below {faithfulness_threshold}: the answer contains claims "
-                            f"the retrieved chunks do not support." if d["faithfulness_score"] is not None else "",
+                        + (f" (RAGAS answer_matches_reference {d['ragas_answer_matches_reference']:.0f})."
+                           if d.get("ragas_answer_matches_reference") is not None
+                           else f" (RAGAS factual_correctness {d['ragas_factual_correctness']:.2f})."
+                           if d.get("ragas_factual_correctness") is not None else "."),
+        "low_faithfulness": f"RAGAS faithfulness {d['ragas_faithfulness']:.2f} is below {faithfulness_threshold}: the answer contains claims "
+                            f"the retrieved chunks do not support." if d["ragas_faithfulness"] is not None else "",
         "bad_citation": "The [n] citations are missing, out of range, or none points to a gold document.",
         "late_hit": f"The gold document first appears at rank {rank}, so a smaller top_k would lose it.",
     }.get(failure_type, "")
@@ -267,20 +288,24 @@ def derive(row: dict, gold_fallback: list[str], judge: dict | None, correct_thre
         rank = first_doc_rank(gold, chunk_ids) if gold else row.get("rank")
     hit = lambda k: None if is_impossible else (rank is not None and rank <= k)
 
-    faith = ragas.get("faithfulness")
-    fact = ragas.get(FACT_CORRECTNESS)
+    rg = {col: ragas.get(key) for key, col in RAGAS_COLS.items()}
+    match, fact = rg["ragas_answer_matches_reference"], rg["ragas_factual_correctness"]
     claude = judge.get("correctness") if judge else None
-    answer_score = fact if fact is not None else ((claude - 1) / 4 if claude is not None else None)
+    # verdict source: Claude-app judge, else the RAGAS answer_matches_reference critic, else (runs scored before it existed) RAGAS
+    # factual_correctness, which under-scores short references and so is only a fallback
+    source = None
     if answer is None:
         correct = None
     elif is_impossible:
-        correct = is_refusal(answer)
+        correct, source = is_refusal(answer), "refusal"
     elif is_refusal(answer):
-        correct = False
+        correct, source = False, "refusal"
     elif claude is not None:
-        correct = claude >= 4
+        correct, source = claude >= 4, "claude"
+    elif match is not None:
+        correct, source = match >= correct_threshold, "ragas"
     elif fact is not None:
-        correct = fact >= correct_threshold
+        correct, source = fact >= correct_threshold, "ragas_factual_correctness"
     else:
         correct = None
 
@@ -298,8 +323,9 @@ def derive(row: dict, gold_fallback: list[str], judge: dict | None, correct_thre
         "gold_context_hit_at_1": hit(1), "gold_context_hit_at_3": hit(3), "gold_context_hit_at_5": hit(5),
         "gold_context_rank": rank, "answer_text_rank": None if is_impossible else row.get("answer_rank"),
         "answer_text_known": not is_impossible and "answer_rank" in row,
-        "generated_answer": answer, "answer_correct": correct, "answer_score": answer_score,
-        "faithfulness_score": faith, "judge_explanation": (judge or {}).get("comment"),
+        "generated_answer": answer, "answer_correct": correct, "correct_source": source, **rg,
+        "claude_correctness_score": (claude - 1) / 4 if claude is not None else None,
+        "judge_explanation": (judge or {}).get("comment"),
         "citation_correct": None if is_impossible else citation_check(answer, retrieved, gold),
         "recall_basis": "document" if (gold and not is_impossible) else ("answer_quote" if not is_impossible else None),
         **{f"evidence_recall_at_{k}": v for k, v in ev.items()},
@@ -444,8 +470,9 @@ def build_report(runs_dir: Path, only: str | None = None, correct_threshold: flo
                         "generated_answer": d["generated_answer"],
                         "retrieved_context_preview": "\n---\n".join(
                             f"[{i}] {doc_of(h['id'])}: {squash(h.get('text', ''))[:300]}" for i, h in enumerate(hits, 1)),
-                        "judge_explanation": d["judge_explanation"], "faithfulness_score": d["faithfulness_score"],
-                        "answer_score": d["answer_score"]})
+                        "judge_explanation": d["judge_explanation"],
+                        **{c: d[c] for c in ("ragas_faithfulness", "ragas_answer_matches_reference", "ragas_factual_correctness",
+                                             "claude_correctness_score")}})
             if d["failure_type"] != "ok":
                 fail.append({"run_id": run_id, "question_id": row["id"], "question": row["question"],
                              "failure_type": d["failure_type"], "gold_answer": d["gold_answer"],
@@ -474,7 +501,6 @@ def build_report(runs_dir: Path, only: str | None = None, correct_threshold: flo
                       if with_text else None)
         generated = any(d["generated_answer"] is not None for d in derived)
         ragas_rows = [r.get("ragas") or {} for r, d in zip(rows, derived) if not d["is_impossible"]]
-        ragas_mean = lambda key: mean(r.get(key) for r in ragas_rows)
         lat = latency_summary([r.get("timings") for r in rows])
         p_tok, c_tok = [d["prompt_tokens"] for d in derived], [d["completion_tokens"] for d in derived]
         known = [(p, c) for p, c in zip(p_tok, c_tok) if p is not None]
@@ -489,7 +515,6 @@ def build_report(runs_dir: Path, only: str | None = None, correct_threshold: flo
             **{f"context_recall_at_{k}": mean(d[f"gold_context_hit_at_{k}"] for d in answerable) for k in (1, 3, 5)},
             "mrr": mrr,
             "answer_accuracy": mean(d["answer_correct"] for d in answerable),
-            "faithfulness_avg": mean(d["faithfulness_score"] for d in answerable),
             "not_found_accuracy": mean(d["answer_correct"] for d in impossible),
             "avg_latency_sec": mean(d["seconds"] for d in derived),
             "avg_prompt_tokens": mean(p_tok), "avg_completion_tokens": mean(c_tok), "estimated_cost": cost,
@@ -504,9 +529,7 @@ def build_report(runs_dir: Path, only: str | None = None, correct_threshold: flo
             "refusal_rate_on_unanswerable": mean(is_refusal(d["generated_answer"]) for d in impossible) if generated else None,
             "false_refusal_rate_on_answerable": (mean(is_refusal(d["generated_answer"]) for d in answerable if d["generated_answer"] is not None)
                                                  if generated else None),
-            "ragas_answer_relevancy": ragas_mean("answer_relevancy"), "ragas_context_recall": ragas_mean("context_recall"),
-            "ragas_context_precision": ragas_mean("llm_context_precision_with_reference"),
-            "ragas_factual_correctness": ragas_mean(FACT_CORRECTNESS),
+            **{col: mean(d[col] for d in answerable) for col in RAGAS_COLS.values()},
             "ragas_n": sum(any(v is not None for v in r.values()) for r in ragas_rows) or None,
             **{f"median_{step}_sec": (lat.get(step) or {}).get("median") for step in ("retrieve", "rerank", "generate")},
         })
