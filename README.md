@@ -43,8 +43,7 @@ Workflow:
    run resumes.
 2. Evaluate with `uv run python -m rag.eval.run_eval run --retrieval-only --testset qasper_tiny/dev`.
 
-`retrieval.mode: fts` and `rerank.enabled: false` were the TechQA winners, so ablate them again on QASPER. The TechQA
-files are archived in `data/archive/techqa/`.
+The QASPER ablation is in "Results" below. The earlier TechQA corpus is archived in `data/archive/techqa/`.
 
 ## Evaluation (ground truth and answer judging by Claude in the Claude app)
 1. `uv run python -m rag.eval.gen_testset export` writes `data/eval/packets/packet_NN.md`.
@@ -66,26 +65,34 @@ disjoint from the dev set) and lands in `data/eval/testset_holdout.jsonl`.
 
 Retrieval hit@k is matched on the supporting quote text, so it stays valid when chunking changes.
 
-## Results (retrieval-only, 54 dev / 69 held-out answerable questions)
-Dev ablation (`data/eval/runs/*_ablation_testset.json`), 512-token chunks:
+## Results (QASPER dev: 32 answerable + 8 unanswerable questions)
+Ablation of chunk size x search mode x rerank (`data/eval/runs/20261012-192903_ablation_qasper_tiny_dev`). Tune on
+`answer_mrr` / `answer_hit@k` (an annotator evidence paragraph found in a retrieved chunk). The plain `mrr` / `hit@k`
+columns are document-level and trivially 1.0, because every question is prefixed with its paper's title.
 
-| Search | Rerank | MRR | hit@1 | hit@3 | hit@5 | time / 60 questions |
+| Chunk | Search | Rerank | answer_mrr | answer_hit@1 | answer_hit@5 | evidence_recall@5 |
 |---|---|---|---|---|---|---|
-| keyword (FTS) | off | **0.835** | 0.722 | 0.944 | 0.963 | ~1 s |
-| hybrid | on | 0.785 | 0.685 | 0.907 | 0.963 | ~1000 s |
-| vector | on | 0.778 | 0.685 | 0.870 | 0.926 | ~1000 s |
-| hybrid | off | 0.727 | 0.611 | 0.815 | 0.889 | ~6 s |
-| vector | off | 0.602 | 0.500 | 0.685 | 0.741 | ~5 s |
+| 1024 | any | on | **0.623** | 0.469 | 0.906 | 0.770 |
+| 512 | any | on | 0.607 | 0.469 | 0.906 | 0.785-0.793 |
+| 256 | any | on | 0.46 | 0.344 | 0.69-0.72 | 0.56-0.59 |
+| 1024 | fts | off | 0.359 | 0.156 | 0.812 | 0.645 |
+| 512 | vector / fts / hybrid | off | 0.321 / 0.295 / 0.287 | 0.19 / 0.09 / 0.13 | 0.625 / 0.656 / 0.656 | 0.49 / 0.48 / 0.53 |
+| 256 | vector / fts / hybrid | off | 0.241 / 0.251 / 0.222 | 0.13 / 0.09 / 0.13 | 0.50 / 0.56 / 0.41 | 0.43 / 0.40 / 0.31 |
 
-Chunk size (256 / 512 / 1024) made little difference for keyword search (MRR 0.845 / 0.835 / 0.836). Reranking lowered
-keyword-search scores and only helped vector search, at about 15 s per query on CPU.
+- **Reranking is the big win on QASPER** (the opposite of TechQA): at 512-1024 tokens it roughly doubles `answer_mrr`
+  and lifts `answer_hit@5` to 0.91. After reranking, search mode makes no difference at 512 or 1024: the 30 candidates
+  already contain the answer chunks and the cross-encoder decides the order, so cheap FTS is the first stage.
+- 256-token chunks are clearly worse. 512 vs 1024 is within noise (one question is 0.03 of hit rate on 32 questions), so
+  the default stays at 512 to avoid re-ingesting.
+- Cost: reranking takes about 15 s/query at 256 tokens and about 40 s/query at 1024 on this CPU (about 1 s without).
 
-Held-out confirmation: keyword, no rerank, 512 gave MRR **0.850** (hit@1 0.797, hit@5 0.957) versus 0.710 for the old
-hybrid + rerank default. The default in `config.yaml` is therefore `mode: fts`, `rerank.enabled: false`.
-
-Caveat: both test sets were written by Claude from the passages themselves, so questions share exact wording with the
-supporting text, which favours keyword matching. Real user questions that paraphrase may do better with `hybrid` (set
-`RAG__RETRIEVAL__MODE=hybrid`). Differences under about 0.05 MRR on ~60 questions are noise.
+Generation + RAGAS on the 1024 / fts / rerank-on config (`data/eval/runs/20261012-233735_ragas_fts_1024_rr_qasper_tiny_dev`,
+llama3.2:3b answers, `gemini-3.5-flash-lite` judge): faithfulness 0.90, answer relevancy 0.75, context precision 0.53,
+context recall 0.65, factual correctness 0.11; `answer_f1` 0.22, no false refusals on answerable questions, but the model
+refuses only 25% of unanswerable ones (`not_found_accuracy` 0.85). Median latency 95 s/question (rerank 39 s, generate
+56 s). The low factual correctness / F1 mostly reflects the 3B model's long answers against QASPER's short references.
+Six of 160 RAGAS jobs failed on Gemini's free-tier daily quota (500 requests/model/day), so those scores cover slightly
+fewer items. Not yet run: the val / test splits for a final check.
 
 A `rerank.min_score` refusal threshold does not work: the near-topic unanswerable questions get reranker scores of
 0.96 to 0.999, the same range as answerable ones (clearly off-topic queries do score near 0). Refusal is left to the

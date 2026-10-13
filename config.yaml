@@ -22,13 +22,13 @@ embedding:
   batch_size: 32
 
 retrieval:
-  mode: fts                 # vector | fts | hybrid  (dev ablation winner; see README. Confirm on the held-out set)
+  mode: fts                 # vector | fts | hybrid  (with rerank on, the mode makes no difference on QASPER; fts is cheapest. See README)
   candidates_k: 30          # how many chunks to pull before reranking
   top_k: 5                  # chunks finally passed to the LLM (after rerank, or truncation if rerank off)
   source_filter: null       # e.g. "1912.01214.md" to restrict to one document
 
 rerank:
-  enabled: false            # reranking hurt FTS and costs ~15 s/query on CPU; helps vector-only search
+  enabled: true             # on QASPER it roughly doubles answer MRR; costs ~15-40 s/query on CPU (see README)
   model: BAAI/bge-reranker-base   # cross-encoder, runs on CPU
   min_score: null           # drop chunks scoring below this (sigmoid-scale 0-1); null = keep all
 
