@@ -225,3 +225,34 @@ def test_citation_check():
     assert exp.citation_check("A [5].", retrieved, ["d1.txt"]) is False       # out of range
     assert exp.citation_check("A without citation", retrieved, ["d1.txt"]) is False
     assert exp.citation_check(NOT_FOUND, retrieved, ["d1.txt"]) is None and exp.citation_check(None, retrieved, []) is None
+
+
+def test_summary_has_qasper_metrics_and_leaves_them_empty_for_old_runs(runs):
+    quote = "alpha beta gamma delta epsilon"
+    hit = chunk("d1.txt", text="intro then alpha beta gamma delta epsilon and more")
+    miss = chunk("d9.txt", text="nothing relevant here at all")
+    rows = [row("a", retrieved=[miss, hit], rank=1, answer_rank=2, answer="Set X [1].", reference_answer="set x", reference_quote=quote,
+                timings={"retrieve": 1.0, "rerank": 0.8, "generate": 3.0},
+                ragas={"answer_relevancy": 0.7, "context_recall": 1.0, "llm_context_precision_with_reference": 0.5,
+                       "factual_correctness(mode=f1)": None}),
+            row("b", retrieved=[miss, hit], rank=1, answer_rank=None, answer=NOT_FOUND, reference_quote=quote,
+                timings={"retrieve": 3.0, "rerank": 1.2, "generate": 5.0}),
+            row("c", answerable=False, gold=(), retrieved=[miss], answer=NOT_FOUND, timings={"retrieve": 2.0, "rerank": 1.0, "generate": 4.0}),
+            row("d", answerable=False, gold=(), retrieved=[miss], answer="Some answer.", timings={})]
+    write_run(runs / "qasper", rows)
+    frames, _ = exp.build_report(runs, only="qasper", commit="")
+    s = frames["summary_by_run"].iloc[0]
+    assert s["answer_mrr"] == pytest.approx(0.25)                              # a: 1/2, b: miss -> (0.5 + 0) / 2
+    assert (s["evidence_recall_at_1"], s["evidence_recall_at_3"], s["evidence_recall_at_5"]) == (0.0, 1.0, 1.0)   # hit at rank 2
+    assert s["context_precision"] == pytest.approx(0.5)                        # relevant chunk at rank 2: precision@2 = 1/2
+    assert s["answer_f1"] == pytest.approx(0.5)                                # a: 1.0, b: refusal text vs "ref answer" -> 0
+    assert s["refusal_rate_on_unanswerable"] == 0.5 and s["false_refusal_rate_on_answerable"] == 0.5
+    assert s["ragas_answer_relevancy"] == pytest.approx(0.7) and s["ragas_n"] == 1
+    assert pd.isna(s["ragas_factual_correctness"])                             # a failed RAGAS job is skipped, not counted as 0
+    assert s["median_rerank_sec"] == pytest.approx(1.0) and s["median_generate_sec"] == pytest.approx(4.0)
+    pq = frames["per_question_results"].set_index("question_id")
+    assert pq.loc["a", "answer_f1"] == pytest.approx(1.0) and pq.loc["a", "evidence_recall_at_1"] == 0.0
+    assert pd.isna(pq.loc["c", "context_precision"]) and pd.isna(pq.loc["c", "answer_f1"])
+
+    old = exp.build_report(runs, only="*256_vector*", commit="")[0]["summary_by_run"].iloc[0]     # no answers, answer_rank or ragas
+    assert all(pd.isna(old[c]) for c in ("answer_mrr", "answer_f1", "ragas_n", "refusal_rate_on_unanswerable", "median_rerank_sec"))

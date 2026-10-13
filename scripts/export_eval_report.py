@@ -25,6 +25,19 @@ How the derived columns are defined:
   failure_type            first match of: retrieval_miss, false_refusal, missed_refusal, wrong_answer, low_faithfulness, bad_citation,
                           late_hit (gold document first at rank > 3). Any further problems are listed in `notes`.
 
+QASPER metrics (also in each run's summary.json, here recomputed from the saved rows with the run's eval.overlap_threshold):
+  answer_text_recall_at_k, answer_mrr   the answer-hit metrics: is the annotators' evidence text inside a top-k chunk. On QASPER use these:
+                          context_recall_at_k and mrr are document level and trivially ~1.0 because each question carries its paper's title.
+  evidence_recall_at_k    share of a question's evidence paragraphs covered by the top-k chunks
+  context_precision       rank-weighted precision of the retrieved chunks, "covers an evidence paragraph" as the relevance verdict
+  answer_f1, answer_token_recall   QASPER token F1 / recall of the generated answer vs the reference (generation runs only)
+  refusal_rate_*          share of unanswerable questions refused / of answerable questions wrongly refused
+                          (not_found_accuracy here = refusal rate on unanswerable only; summary.json's not_found_accuracy is over all questions)
+  ragas_*                 means over answerable questions that RAGAS scored (jobs that failed, e.g. on a quota, are skipped, so
+                          ragas_n counts questions with at least one score and an individual metric can rest on slightly fewer)
+  median_*_sec            median seconds in retrieve / rerank / generate (from the saved timings)
+Empty cells mean the inputs were not in the run (e.g. no generated answers in a retrieval-only run).
+
 How to tell whether a test set is too easy to separate the runs (summary_by_run and the two extra sheets):
   recall_at_1_ci95_*      95% Wilson interval of context_recall_at_1 over the answerable questions. Runs whose intervals overlap are not
                           distinguishable on this test set; with 48 questions one question is already 2 points.
@@ -49,7 +62,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from rag.eval.metrics import first_doc_rank, is_refusal
+from rag.eval.metrics import (answer_overlap, context_precision, evidence_recall, first_doc_rank, is_refusal,
+                              latency_summary)
 
 ROOT = Path(__file__).resolve().parent.parent
 EXCEL_MAX_CHARS = 1000
@@ -60,11 +74,15 @@ SUMMARY_COLS = ["run_id", "retriever_type", "chunk_size", "chunk_overlap", "top_
                 "context_recall_at_1", "context_recall_at_3", "context_recall_at_5", "mrr", "answer_accuracy", "faithfulness_avg",
                 "not_found_accuracy", "avg_latency_sec", "avg_prompt_tokens", "avg_completion_tokens", "estimated_cost", "recall_basis",
                 "n_answerable", "recall_at_1_ci95_low", "recall_at_1_ci95_high", "answer_text_recall_at_1", "answer_text_recall_at_3",
-                "answer_text_recall_at_5"]
+                "answer_text_recall_at_5", "answer_mrr", "evidence_recall_at_1", "evidence_recall_at_3", "evidence_recall_at_5",
+                "context_precision", "answer_f1", "answer_token_recall", "refusal_rate_on_unanswerable",
+                "false_refusal_rate_on_answerable", "ragas_answer_relevancy", "ragas_context_recall", "ragas_context_precision",
+                "ragas_factual_correctness", "ragas_n", "median_retrieve_sec", "median_rerank_sec", "median_generate_sec"]
 PER_QUESTION_COLS = ["run_id", "question_id", "split", "question", "is_impossible", "gold_answer", "gold_context_ids",
                      "retrieved_context_ids", "retrieved_chunk_ids", "gold_context_hit_at_1", "gold_context_hit_at_3",
                      "gold_context_hit_at_5", "gold_context_rank", "generated_answer", "answer_correct", "faithfulness_score",
-                     "citation_correct", "failure_type", "notes", "answer_text_rank"]
+                     "citation_correct", "failure_type", "notes", "answer_text_rank", "evidence_recall_at_1", "evidence_recall_at_3",
+                     "evidence_recall_at_5", "context_precision", "answer_f1", "answer_token_recall"]
 PAIRED_COLS = ["run_id", "testset", "reference_run", "n_paired", "hit1_wins", "hit1_losses", "hit1_sign_test_p",
                "hit5_wins", "hit5_losses", "hit5_sign_test_p"]
 DIFFICULTY_COLS = ["testset", "baseline", "n_answerable", "n_documents", "gold_share_of_documents", "context_recall_at_1",
@@ -233,7 +251,8 @@ def citation_check(answer: str | None, retrieved: list[dict], gold: list[str]) -
     return any(doc_of(retrieved[n - 1]["id"]) in gold for n in cited)
 
 
-def derive(row: dict, gold_fallback: list[str], judge: dict | None, correct_threshold: float) -> dict:
+def derive(row: dict, gold_fallback: list[str], judge: dict | None, correct_threshold: float,
+           overlap_threshold: float = 0.6) -> dict:
     """Everything the report needs for one question, computed from the saved row."""
     retrieved = row.get("retrieved", [])
     chunk_ids = [h["id"] for h in retrieved]
@@ -265,6 +284,13 @@ def derive(row: dict, gold_fallback: list[str], judge: dict | None, correct_thre
     else:
         correct = None
 
+    quote = row.get("reference_quote")
+    texts = [h.get("text", "") for h in retrieved]
+    scored_quote = bool(quote) and not is_impossible
+    ev = {k: evidence_recall(quote, texts[:k], overlap_threshold) if scored_quote else None for k in (1, 3, 5)}
+    overlap = (answer_overlap(answer, row["reference_answer"])
+               if answer is not None and not is_impossible and row.get("reference_answer") else (None, None))
+
     return {
         "question_id": row["id"], "question": row["question"], "is_impossible": is_impossible,
         "gold_answer": row.get("reference_answer") or "", "gold_context_ids": gold,
@@ -276,6 +302,9 @@ def derive(row: dict, gold_fallback: list[str], judge: dict | None, correct_thre
         "faithfulness_score": faith, "judge_explanation": (judge or {}).get("comment"),
         "citation_correct": None if is_impossible else citation_check(answer, retrieved, gold),
         "recall_basis": "document" if (gold and not is_impossible) else ("answer_quote" if not is_impossible else None),
+        **{f"evidence_recall_at_{k}": v for k, v in ev.items()},
+        "context_precision": context_precision(quote, texts, overlap_threshold) if scored_quote else None,
+        "answer_f1": overlap[0], "answer_token_recall": overlap[1],
     }
 
 
@@ -396,7 +425,8 @@ def build_report(runs_dir: Path, only: str | None = None, correct_threshold: flo
 
         derived = []
         for row in rows:
-            d = derive(row, (index.get(row["id"]) or {}).get("gold_context_ids") or [], judge.get(row["id"]), correct_threshold)
+            d = derive(row, (index.get(row["id"]) or {}).get("gold_context_ids") or [], judge.get(row["id"]), correct_threshold,
+                       cfg.get("eval", {}).get("overlap_threshold", 0.6))
             d["failure_type"], flags = classify(d, faithfulness_threshold)
             d["notes"] = ("also: " + ", ".join(flags[1:])) if len(flags) > 1 else ""
             d["run_id"], d["split"] = run_id, split
@@ -440,6 +470,12 @@ def build_report(runs_dir: Path, only: str | None = None, correct_threshold: flo
                              "hits": {d["question_id"]: (bool(d["gold_context_hit_at_1"]), bool(d["gold_context_hit_at_5"]))
                                       for d in answerable}})
         baseline_inputs.setdefault(testset_name, (eval_dir / testset_name).parent / "contexts.jsonl")
+        answer_mrr = (mean((1 / d["answer_text_rank"]) if d["answer_text_rank"] else 0.0 for d in with_text)
+                      if with_text else None)
+        generated = any(d["generated_answer"] is not None for d in derived)
+        ragas_rows = [r.get("ragas") or {} for r, d in zip(rows, derived) if not d["is_impossible"]]
+        ragas_mean = lambda key: mean(r.get(key) for r in ragas_rows)
+        lat = latency_summary([r.get("timings") for r in rows])
         p_tok, c_tok = [d["prompt_tokens"] for d in derived], [d["completion_tokens"] for d in derived]
         known = [(p, c) for p, c in zip(p_tok, c_tok) if p is not None]
         if price_in == 0 and price_out == 0:
@@ -460,6 +496,19 @@ def build_report(runs_dir: Path, only: str | None = None, correct_threshold: flo
             "recall_basis": "/".join(sorted(b for b in bases if b)) or None,
             "n_answerable": len(answerable), "recall_at_1_ci95_low": ci_low, "recall_at_1_ci95_high": ci_high,
             **{f"answer_text_recall_at_{k}": v for k, v in text_recall.items()},
+            "answer_mrr": answer_mrr,
+            **{f"evidence_recall_at_{k}": mean(d[f"evidence_recall_at_{k}"] for d in answerable) for k in (1, 3, 5)},
+            "context_precision": mean(d["context_precision"] for d in answerable),
+            "answer_f1": mean(d["answer_f1"] for d in answerable),
+            "answer_token_recall": mean(d["answer_token_recall"] for d in answerable),
+            "refusal_rate_on_unanswerable": mean(is_refusal(d["generated_answer"]) for d in impossible) if generated else None,
+            "false_refusal_rate_on_answerable": (mean(is_refusal(d["generated_answer"]) for d in answerable if d["generated_answer"] is not None)
+                                                 if generated else None),
+            "ragas_answer_relevancy": ragas_mean("answer_relevancy"), "ragas_context_recall": ragas_mean("context_recall"),
+            "ragas_context_precision": ragas_mean("llm_context_precision_with_reference"),
+            "ragas_factual_correctness": ragas_mean(FACT_CORRECTNESS),
+            "ragas_n": sum(any(v is not None for v in r.values()) for r in ragas_rows) or None,
+            **{f"median_{step}_sec": (lat.get(step) or {}).get("median") for step in ("retrieve", "rerank", "generate")},
         })
 
     difficulty = [b for name, path in baseline_inputs.items() if name and (b := title_baseline(name, testsets.get(name, {}), path))]
