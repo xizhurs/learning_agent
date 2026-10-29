@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Iterator
 
 from rag.config import Settings, get_settings
 from rag.generate import NOT_FOUND, build_messages, generate, generate_stream, rewrite_question

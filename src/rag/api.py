@@ -17,7 +17,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from rag.config import PROJECT_ROOT, load_settings
-from rag.ingest.build import ensure_table
 from rag.pipeline import Pipeline
 
 logging.basicConfig(level=logging.INFO)

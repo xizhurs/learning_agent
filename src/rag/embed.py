@@ -54,7 +54,7 @@ def _embed_batch(texts: list[str], model: str) -> list[list[float]]:
 
 
 def _key(model: str, text: str) -> str:
-    return hashlib.sha1(f"{model}\n{text}".encode("utf-8")).hexdigest()
+    return hashlib.sha1(f"{model}\n{text}".encode()).hexdigest()
 
 
 def _load_cache(path: Path) -> dict[str, list[float]]:

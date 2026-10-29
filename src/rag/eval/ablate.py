@@ -27,8 +27,8 @@ from rag.eval.run_eval import (
     load_testset,
     ragas_scores,
     run_items,
-    summarise,
     slugify_testset,
+    summarise,
 )
 from rag.tracing import flush as flush_traces
 

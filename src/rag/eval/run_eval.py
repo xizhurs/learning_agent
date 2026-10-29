@@ -40,7 +40,9 @@ from rag.eval.metrics import (
     spearman,
 )
 from rag.generate import build_messages, generate
-from rag.tracing import annotate, enabled as tracing_enabled, flush as flush_traces, start_trace
+from rag.tracing import annotate, start_trace
+from rag.tracing import enabled as tracing_enabled
+from rag.tracing import flush as flush_traces
 
 
 # Thin wrappers: importing rag.ingest.build / rag.retrieve at module level would pull in docling and lancedb, which a
@@ -501,8 +503,8 @@ def ragas_scores(rows: list[dict], settings: Settings, only: set[str] | None = N
     from ragas import EvaluationDataset, evaluate
     from ragas.metrics import (
         AspectCritic,
-        Faithfulness,
         FactualCorrectness,
+        Faithfulness,
         LLMContextPrecisionWithReference,
         LLMContextRecall,
         ResponseRelevancy,

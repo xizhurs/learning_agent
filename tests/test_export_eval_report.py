@@ -458,6 +458,6 @@ def test_claude_judge_score_stays_separate_from_ragas_columns(tmp_path):
     (run / "judge_reply.json").write_text(json.dumps([{"id": "a", "correctness": 5}]), encoding="utf-8")
     pq = exp.build_report(tmp_path / "runs", commit="")[0]["per_question_results"].iloc[0]
     assert pq["claude_correctness_score"] == 1.0 and pq["ragas_answer_matches_reference"] == 0.0
-    assert (
-        pq["answer_correct"] == True and pq["correct_source"] == "claude"
-    )  # noqa: E712  (judge replies outrank RAGAS)
+    assert (  # judge replies outrank RAGAS
+        pq["answer_correct"] == True and pq["correct_source"] == "claude"  # noqa: E712
+    )

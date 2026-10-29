@@ -5,8 +5,8 @@ from rag.eval.run_eval import (
     assert_hosted_safe,
     judge_eligible,
     normalize_item,
-    summarise,
     slugify_testset,
+    summarise,
 )
 from rag.ingest.chunk import chunk_document
 from rag.ingest.parse import SUPPORTED, parse_text_document

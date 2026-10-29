@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Iterator
+from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 from rag.config import Generation
 from rag.tracing import Span, child_of

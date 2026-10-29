@@ -1,5 +1,4 @@
 import json
-from types import SimpleNamespace
 
 import pytest
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor

@@ -84,7 +84,7 @@ class Span:
         self,
         name: str,
         kind: str,
-        parent: "Span | None" = None,
+        parent: Span | None = None,
         input: Any = None,
         session_id: str | None = None,
         attrs: dict | None = None,
@@ -123,7 +123,7 @@ class Span:
         return format(self._span.get_span_context().span_id, "016x") if self._span is not None else None
 
     # ---- building the tree ---------------------------------------------------------------------
-    def child(self, name: str, kind: str = "chain", input: Any = None, **attrs) -> "Span":
+    def child(self, name: str, kind: str = "chain", input: Any = None, **attrs) -> Span:
         return Span(name, kind, parent=self, input=input, attrs=attrs)
 
     def set(self, **attrs) -> None:
@@ -202,7 +202,7 @@ def start_trace(
     return Span(name, kind, input=input, session_id=session_id, attrs=attrs)
 
 
-def child_of(parent: "Span | None", name: str, kind: str = "chain", input: Any = None, **attrs) -> Span:
+def child_of(parent: Span | None, name: str, kind: str = "chain", input: Any = None, **attrs) -> Span:
     """A child span, or a standalone one (timing only) when no parent trace is active."""
     return (
         parent.child(name, kind, input, **attrs) if parent is not None else Span(name, kind, input=input, attrs=attrs)
