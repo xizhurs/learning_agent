@@ -2,6 +2,7 @@
 
   python -m rag.eval.run_eval run [--tag baseline] [--limit 20] [--retrieval-only] [--ragas] [--testset testset_holdout]
   python -m rag.eval.run_eval run --reuse-retrieval <run dir> ...      # generation only: reuse that run's saved retrieved chunks
+  python -m rag.eval.run_eval run --resume <run dir> ...               # a killed run: every answer is saved to items.jsonl as it is produced; only the rest is asked
   python -m rag.eval.run_eval score-ragas --run <run or ablation dir> [--metrics a,b]   # RAGAS on saved rows (needs the judge key in the env)
   python -m rag.eval.run_eval check-judge                             # verify hosted-judge key / model / rate limit
   python -m rag.eval.run_eval export-judge --run <run_dir> [--n 20]   # packet for manual judging in the Claude app
@@ -29,9 +30,19 @@ from rag.config import Settings, get_settings
 from rag.eval.metrics import (answer_overlap, context_precision, evidence_recall, first_doc_rank, first_hit_rank, is_refusal,
                               latency_summary, retrieval_summary, spearman)
 from rag.generate import build_messages, generate
-from rag.ingest.build import ensure_table
-from rag.retrieve import retrieve
 from rag.tracing import annotate, enabled as tracing_enabled, flush as flush_traces, start_trace
+
+
+# Thin wrappers: importing rag.ingest.build / rag.retrieve at module level would pull in docling and lancedb, which a
+# generation-only run (--reuse-retrieval, e.g. on Databricks) neither has nor needs.
+def ensure_table(settings: Settings):
+    from rag.ingest.build import ensure_table as _ensure_table
+    return _ensure_table(settings)
+
+
+def retrieve(*args, **kwargs):
+    from rag.retrieve import retrieve as _retrieve
+    return _retrieve(*args, **kwargs)
 
 
 def slugify_testset(name: str) -> str:
@@ -78,15 +89,22 @@ def load_saved_retrieval(run_dir: Path) -> dict[str, list[SavedHit]]:
 
 
 def run_items(testset: list[dict], settings: Settings, generate_answers: bool, limit: int | None = None,
-              session_id: str | None = None, saved_retrieval: dict[str, list[SavedHit]] | None = None) -> list[dict]:
+              session_id: str | None = None, saved_retrieval: dict[str, list[SavedHit]] | None = None,
+              done: dict[str, dict] | None = None, on_row=None) -> list[dict]:
     """One trace per question (Phoenix session = session_id). Ground truth is attached to the trace as eval.* attributes.
 
     With `saved_retrieval` (question id -> chunks) the search / rerank is skipped and those chunks are used, so only the
-    generation step changes between two runs (a prompt comparison on identical context)."""
+    generation step changes between two runs (a prompt comparison on identical context).
+    `done` (question id -> finished row, from a killed run) is reused as is instead of re-asking; `on_row(row)` is called
+    after each new row so the caller can save it straight away."""
     table = None if saved_retrieval is not None else ensure_table(settings)
     rows = []
     items = testset[:limit] if limit else testset
     for n, item in enumerate(items, 1):
+        if done and item["id"] in done:
+            rows.append(done[item["id"]])
+            print(f"  [{n}/{len(items)}] already answered, skipped: {item['question'][:60]}")
+            continue
         t0 = time.time()
         root = start_trace(
             settings, "eval.question", input=item["question"], session_id=session_id,
@@ -129,6 +147,8 @@ def run_items(testset: list[dict], settings: Settings, generate_answers: bool, l
         row["timings"] = dict(root.timings)
         row["trace_id"], row["span_id"] = root.trace_id, root.span_id
         rows.append(row)
+        if on_row:
+            on_row(row)
         print(f"  [{n}/{len(items)}] rank={row['rank']} {item['question'][:70]}")
     return rows
 
@@ -175,13 +195,15 @@ class PrivacyError(RuntimeError):
 def judge_eligible(item: dict, allowed_source: str | None) -> bool:
     """Single-passage, answerable item whose supporting passage comes from the allowed document.
 
-    multi_passage items are excluded: only the first passage's source is recorded, so a second passage
-    (and hence the reference answer) could come from another document.
-    allowed_source=None means the corpus is public (no per-document restriction): any answerable single-passage item.
+    With a restriction, multi_passage items are excluded: only the first passage's source is recorded, so a second
+    passage (and hence the reference answer) could come from another document.
+    allowed_source=None means nothing is restricted (no per-document restriction): any answerable item.
     """
-    if not item.get("answerable") or item.get("type") == "multi_passage":
+    if not item.get("answerable"):
         return False
-    return allowed_source is None or item.get("source") == allowed_source
+    if allowed_source is None:
+        return True
+    return item.get("type") != "multi_passage" and item.get("source") == allowed_source
 
 
 def assert_hosted_safe(rows: list[dict], allowed_source: str | None) -> None:
@@ -416,6 +438,29 @@ def save_run(tag: str, settings: Settings, rows: list[dict], summary: dict, name
     return run_dir
 
 
+def append_row(run_dir: Path, row: dict) -> None:
+    """Add one finished row to the run's items.jsonl (so a killed run keeps every answer it produced)."""
+    with (run_dir / "items.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def read_partial_rows(run_dir: Path, settings: Settings) -> dict[str, dict]:
+    """Answered rows of a killed run (question id -> row) for --resume. Refuses if the settings differ from the run's config.json,
+    so a resumed run never mixes two configurations. A half-written last line is dropped and items.jsonl is rewritten clean."""
+    if json.loads((run_dir / "config.json").read_text(encoding="utf-8")) != json.loads(settings.model_dump_json()):
+        raise SystemExit(f"--resume: current settings differ from {run_dir / 'config.json'}; set the same env overrides as the original run")
+    good = []
+    for line in (run_dir / "items.jsonl").read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("answer") is not None:
+            good.append(row)
+    (run_dir / "items.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in good), encoding="utf-8")
+    return {r["id"]: r for r in good}
+
+
 def apply_judge_scope(testset: list[dict], settings: Settings) -> tuple[list[dict], dict]:
     """Hosted-judge scope: only the allowed document's single-passage answerable items, retrieval filtered to that document.
 
@@ -482,10 +527,24 @@ def cmd_run(args) -> None:
                   f"retrieval filtered to that document")
         else:
             print(f"hosted-judge scope: unrestricted (public corpus), {len(testset)} items")
-    run_name = run_name_for(f"{args.tag}_{slugify_testset(args.testset)}")
+    runs_dir = settings.paths.resolve("eval_dir") / "runs"
+    done = None
+    if args.resume:
+        run_dir = Path(args.resume)
+        run_name = run_dir.name
+        if run_dir.resolve() != (runs_dir / run_name).resolve():
+            raise SystemExit(f"--resume: {run_dir} is not a folder under {runs_dir}")
+        done = read_partial_rows(run_dir, settings)
+        print(f"resuming {run_name}: {len(done)} answers already saved")
+    else:
+        run_name = run_name_for(f"{args.tag}_{slugify_testset(args.testset)}")
+        run_dir = runs_dir / run_name
+        run_dir.mkdir(parents=True)
+        (run_dir / "config.json").write_text(settings.model_dump_json(indent=2), encoding="utf-8")
+        (run_dir / "items.jsonl").write_text("", encoding="utf-8")
     saved = load_saved_retrieval(Path(args.reuse_retrieval)) if args.reuse_retrieval else None
     rows = run_items(testset, settings, generate_answers=not args.retrieval_only, limit=args.limit, session_id=run_name,
-                     saved_retrieval=saved)
+                     saved_retrieval=saved, done=done, on_row=lambda row: append_row(run_dir, row))
     summary = {"testset": args.testset} | summary_extra | summarise(rows, settings)
     if args.ragas and not args.retrieval_only:
         t0 = time.time()
@@ -600,6 +659,8 @@ def main() -> None:
     r.add_argument("--retrieval-only", action="store_true", help="skip answer generation (fast, no LLM)")
     r.add_argument("--reuse-retrieval", metavar="RUN_DIR",
                    help="generation only: use the retrieved chunks saved in that run (same testset) instead of searching and reranking")
+    r.add_argument("--resume", metavar="RUN_DIR",
+                   help="continue a killed run: keep the answers already in RUN_DIR/items.jsonl and ask only the rest (same settings/env as the original)")
     r.add_argument("--testset", default="testset",
                    help="data/eval/<name>.jsonl: testset (dev, default) or testset_holdout (final check only)")
     sub.add_parser("check-judge")

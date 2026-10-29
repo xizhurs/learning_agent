@@ -72,7 +72,7 @@ def test_unrestricted_judge_scope_keeps_all_items_and_does_not_filter_retrieval(
     kept, extra = apply_judge_scope(items, s)
     assert [i["id"] for i in kept] == ["a", "b"] and s.retrieval.source_filter is None and extra["ragas_scope"] == "unrestricted"
     assert judge_eligible(items[0], None) and not judge_eligible(items[1], None)
-    assert not judge_eligible({**items[0], "type": "multi_passage"}, None)
+    assert judge_eligible({**items[0], "type": "multi_passage"}, None)       # only a restriction needs a single known source
     row = {**items[0], "retrieved": [{"id": "other.txt::00001"}], "answer": "x"}
     assert_hosted_safe([row], None)          # any document is fine when the corpus is public
 
