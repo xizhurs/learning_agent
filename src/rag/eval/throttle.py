@@ -1,4 +1,5 @@
 """Minimum-interval request throttle for rate-limited hosted APIs (shared by all workers)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,8 +11,12 @@ from typing import Callable
 class Throttle:
     """Spaces calls at least `min_interval` seconds apart. Thread-safe; also usable from asyncio."""
 
-    def __init__(self, min_interval: float, clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], None] = time.sleep):
+    def __init__(
+        self,
+        min_interval: float,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
         self.min_interval = min_interval
         self._clock, self._sleep = clock, sleep
         self._lock = threading.Lock()
@@ -46,5 +51,7 @@ def http_clients(throttle: Throttle):
     async def abefore(_request):
         await throttle.await_slot()
 
-    return (httpx.Client(event_hooks={"request": [before]}, timeout=180),
-            httpx.AsyncClient(event_hooks={"request": [abefore]}, timeout=180))
+    return (
+        httpx.Client(event_hooks={"request": [before]}, timeout=180),
+        httpx.AsyncClient(event_hooks={"request": [abefore]}, timeout=180),
+    )

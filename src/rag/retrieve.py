@@ -1,4 +1,5 @@
 """Retrieval: vector | fts | hybrid (RRF fusion in LanceDB) -> optional cross-encoder rerank."""
+
 from __future__ import annotations
 
 import re
@@ -21,7 +22,7 @@ class Hit:
     section: str
     kind: str
     text: str
-    score: float          # final score: rerank probability if reranked, else retrieval score
+    score: float  # final score: rerank probability if reranked, else retrieval score
     retrieval_score: float
 
     def citation(self) -> str:
@@ -42,7 +43,9 @@ def _fts_safe(query: str) -> str:
 
 
 def _embed(query: str, settings: Settings, span: Span | None):
-    step = child_of(span, "embed_query", "embedding", input=query, **{"embedding__model_name": settings.embedding.model})
+    step = child_of(
+        span, "embed_query", "embedding", input=query, **{"embedding__model_name": settings.embedding.model}
+    )
     vec = embed_query(query, settings.embedding)
     step.end()
     return vec
@@ -69,8 +72,13 @@ def _search(table, query: str, settings: Settings, span: Span | None = None):
     if r.source_filter:
         escaped = r.source_filter.replace("'", "''")
         q = q.where(f"source = '{escaped}'", prefilter=True)
-    step = child_of(span, "search", "chain", input=_fts_safe(query) if r.mode == "fts" else query,
-                    **{"retrieval__mode": r.mode, "retrieval__candidates_k": k, "retrieval__source_filter": r.source_filter})
+    step = child_of(
+        span,
+        "search",
+        "chain",
+        input=_fts_safe(query) if r.mode == "fts" else query,
+        **{"retrieval__mode": r.mode, "retrieval__candidates_k": k, "retrieval__source_filter": r.source_filter},
+    )
     rows = q.to_list()
     step.end(output=f"{len(rows)} candidates")
     return rows, score_col, higher_better
@@ -78,9 +86,17 @@ def _search(table, query: str, settings: Settings, span: Span | None = None):
 
 def retrieve(query: str, settings: Settings, table=None, span: Span | None = None) -> list[Hit]:
     """Top-k chunks for the query. With `span` (a trace root/parent) the steps are traced and timed under it."""
-    step = child_of(span, "retrieve", "retriever", input=query,
-                    **{"retrieval__mode": settings.retrieval.mode, "retrieval__top_k": settings.retrieval.top_k,
-                       "rerank__enabled": settings.rerank.enabled})
+    step = child_of(
+        span,
+        "retrieve",
+        "retriever",
+        input=query,
+        **{
+            "retrieval__mode": settings.retrieval.mode,
+            "retrieval__top_k": settings.retrieval.top_k,
+            "rerank__enabled": settings.rerank.enabled,
+        },
+    )
     table = table if table is not None else open_table(settings)
     rows, score_col, higher_better = _search(table, query, settings, step)
 
@@ -89,9 +105,14 @@ def retrieve(query: str, settings: Settings, table=None, span: Span | None = Non
         raw = float(row.get(score_col, 0.0))
         hits.append(
             Hit(
-                id=row["id"], source=row["source"], page=row["page"], section=row["section"],
-                kind=row["kind"], text=row["text"],
-                score=raw if higher_better else -raw, retrieval_score=raw if higher_better else -raw,
+                id=row["id"],
+                source=row["source"],
+                page=row["page"],
+                section=row["section"],
+                kind=row["kind"],
+                text=row["text"],
+                score=raw if higher_better else -raw,
+                retrieval_score=raw if higher_better else -raw,
             )
         )
 

@@ -7,6 +7,7 @@ is silently lost and text in <w:del> (as <w:delText>) is ignored. We rewrite the
   * table rows whose row mark is deleted -> removed
   * *PrChange elements (old formatting records) and paragraph/run-mark ins/del markers -> removed
 """
+
 from __future__ import annotations
 
 import zipfile
@@ -46,13 +47,17 @@ def _accept_changes(root: etree._Element, stats: CleanStats) -> None:
 
     # Remove deleted / moved-away content entirely (keep tail text that follows the element).
     for tag in ("del", "moveFrom"):
-        for el in root.xpath(f"//w:{tag}[not(parent::w:rPr) and not(parent::w:trPr) and not(parent::w:pPr)]", namespaces=NS):
+        for el in root.xpath(
+            f"//w:{tag}[not(parent::w:rPr) and not(parent::w:trPr) and not(parent::w:pPr)]", namespaces=NS
+        ):
             _remove_keep_tail(el)
             stats.deletions_removed += 1
 
     # Unwrap insertions: move children up to the parent in place.
     for tag in ("ins", "moveTo"):
-        for el in root.xpath(f"//w:{tag}[not(parent::w:rPr) and not(parent::w:trPr) and not(parent::w:pPr)]", namespaces=NS):
+        for el in root.xpath(
+            f"//w:{tag}[not(parent::w:rPr) and not(parent::w:trPr) and not(parent::w:pPr)]", namespaces=NS
+        ):
             _unwrap(el)
             stats.insertions_accepted += 1
 

@@ -7,6 +7,7 @@ fixed_tokens  : ignore structure, slide a max_tokens window with `overlap` over 
 Token counts use a BERT wordpiece tokenizer (nomic-embed-text is BERT based), which is close
 enough to size chunks; the embedding model never sees more than 2048 tokens here anyway.
 """
+
 from __future__ import annotations
 
 import re
@@ -25,10 +26,10 @@ TOKENIZER_NAME = "bert-base-uncased"
 class Chunk:
     id: str
     source: str
-    page: int          # 0 when the format has no pages (docx)
-    section: str       # "Heading 1 > Heading 2"
-    kind: str          # "text" | "table"
-    text: str          # what gets embedded, indexed and shown to the LLM (includes heading prefix)
+    page: int  # 0 when the format has no pages (docx)
+    section: str  # "Heading 1 > Heading 2"
+    kind: str  # "text" | "table"
+    text: str  # what gets embedded, indexed and shown to the LLM (includes heading prefix)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -51,7 +52,7 @@ class _Block:
     section: str
     page: int
     is_table: bool = False
-    table_header: str | None = None   # markdown header + separator rows, for splitting big tables
+    table_header: str | None = None  # markdown header + separator rows, for splitting big tables
 
 
 def _page_of(item) -> int:
@@ -61,7 +62,7 @@ def _page_of(item) -> int:
 def _blocks(doc: DoclingDocument) -> list[_Block]:
     """Flatten the document into text/table blocks annotated with their heading path."""
     blocks: list[_Block] = []
-    headings: list[tuple[int, str]] = []   # (level, title)
+    headings: list[tuple[int, str]] = []  # (level, title)
     skip = {DocItemLabel.PAGE_HEADER, DocItemLabel.PAGE_FOOTER}
 
     for item, _level in doc.iterate_items():
@@ -98,7 +99,7 @@ def _split_long_text(text: str, max_tokens: int, overlap: int) -> list[str]:
     cur_tok = 0
     for s in sentences:
         t = count_tokens(s)
-        if t > max_tokens:   # a single giant "sentence": hard split by token windows
+        if t > max_tokens:  # a single giant "sentence": hard split by token windows
             if cur:
                 parts.append(" ".join(cur))
                 cur, cur_tok = [], 0
@@ -155,11 +156,11 @@ def _normalise_table(md: str) -> tuple[str, str | None]:
         cs: list[str] = []
         for c in cells(line):
             if c and cs and c == cs[-1]:
-                continue                      # merged cell repeated by the parser
+                continue  # merged cell repeated by the parser
             cs.append(c)
         row = fmt(cs)
         if row in seen:
-            continue                          # identical row repeated (merged rows)
+            continue  # identical row repeated (merged rows)
         seen.add(row)
         out.append(row)
     return "\n".join(out), header
@@ -178,7 +179,7 @@ def _split_table(block: _Block, max_tokens: int, overlap: int = 0) -> list[str]:
     cur: list[str] = []
     cur_tok = head_tok
     pieces: list[str] = []
-    for row in body:                          # a single oversized row is split on sentence boundaries
+    for row in body:  # a single oversized row is split on sentence boundaries
         if count_tokens(row) > row_budget:
             inner = row.strip().strip("|").strip()
             pieces += [f"| {p} |" for p in _split_long_text(inner, row_budget, overlap)]
@@ -216,7 +217,7 @@ def chunk_document(doc: DoclingDocument, cfg: Chunking) -> list[Chunk]:
 
 
 def _chunk_heading_aware(blocks: list[_Block], label: str, cfg: Chunking):
-    out: list[tuple[int, str, str, str]] = []   # (page, section, kind, text)
+    out: list[tuple[int, str, str, str]] = []  # (page, section, kind, text)
     buf: list[str] = []
     buf_tok = 0
     buf_section, buf_page = "", 0
@@ -270,7 +271,7 @@ def _chunk_fixed(blocks: list[_Block], label: str, cfg: Chunking):
     full = sep.join(text_parts)
     enc = _tokenizer()(full, add_special_tokens=False, return_offsets_mapping=True, truncation=False)
     offsets = enc["offset_mapping"]
-    prefix_cost = count_tokens(_prefix(label, "", cfg.heading_prefix)) + 12   # rough allowance for the section path
+    prefix_cost = count_tokens(_prefix(label, "", cfg.heading_prefix)) + 12  # rough allowance for the section path
     window = max(32, cfg.max_tokens - (prefix_cost if cfg.heading_prefix else 0))
     step = max(1, window - cfg.overlap)
 

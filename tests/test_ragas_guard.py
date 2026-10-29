@@ -20,8 +20,8 @@ def _row(chunk_docs, **kw):
 
 def test_eligibility_rules():
     assert judge_eligible(_item(), PDF)
-    assert not judge_eligible(_item(source=PD), PDF)                 # wrong document
-    assert not judge_eligible(_item(type_="multi_passage"), PDF)     # second passage could be from the PD draft
+    assert not judge_eligible(_item(source=PD), PDF)  # wrong document
+    assert not judge_eligible(_item(type_="multi_passage"), PDF)  # second passage could be from the PD draft
     assert not judge_eligible(_item(answerable=False, source=""), PDF)
 
 
@@ -51,4 +51,4 @@ def test_api_key_is_not_in_settings_snapshot(monkeypatch):
 def test_spearman():
     assert spearman([1, 2, 3, 4, 5], [10, 20, 30, 40, 50]) == pytest.approx(1.0)
     assert spearman([1, 2, 3, 4, 5], [5, 4, 3, 2, 1]) == pytest.approx(-1.0)
-    assert spearman([1, 1, 1], [1, 2, 3]) is None        # constant input: undefined
+    assert spearman([1, 1, 1], [1, 2, 3]) is None  # constant input: undefined

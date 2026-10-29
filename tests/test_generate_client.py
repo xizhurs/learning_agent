@@ -16,8 +16,10 @@ class FakeClient:
 
     def _create(self, **kw):
         self.calls.append(kw)
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=self._content))],
-                               usage=SimpleNamespace(prompt_tokens=120, completion_tokens=5))
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self._content))],
+            usage=SimpleNamespace(prompt_tokens=120, completion_tokens=5),
+        )
 
 
 @pytest.fixture(autouse=True)

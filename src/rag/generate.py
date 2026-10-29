@@ -1,4 +1,5 @@
 """Prompting and generation with a local Ollama model (or, via set_chat_client, an OpenAI-compatible endpoint)."""
+
 from __future__ import annotations
 
 import time
@@ -68,7 +69,9 @@ _chat_client = None
 
 def _ollama():
     if ollama is None:
-        raise ImportError("the ollama package is not installed: install it, or call set_chat_client() with an OpenAI-compatible client")
+        raise ImportError(
+            "the ollama package is not installed: install it, or call set_chat_client() with an OpenAI-compatible client"
+        )
     return ollama
 
 
@@ -106,8 +109,11 @@ def _ollama_stats(resp) -> dict:
     out = {"llm__token_count__prompt": g("prompt_eval_count"), "llm__token_count__completion": g("eval_count")}
     if out["llm__token_count__prompt"] is not None and out["llm__token_count__completion"] is not None:
         out["llm__token_count__total"] = out["llm__token_count__prompt"] + out["llm__token_count__completion"]
-    for key, name in (("load_duration", "ollama__load_s"), ("prompt_eval_duration", "ollama__prompt_eval_s"),
-                      ("eval_duration", "ollama__generate_s")):
+    for key, name in (
+        ("load_duration", "ollama__load_s"),
+        ("prompt_eval_duration", "ollama__prompt_eval_s"),
+        ("eval_duration", "ollama__generate_s"),
+    ):
         if g(key) is not None:
             out[name] = round(g(key) / 1e9, 3)
     if g("eval_count") and g("eval_duration"):

@@ -1,4 +1,5 @@
 """LanceDB table holding chunks: vector + full-text index + metadata."""
+
 from __future__ import annotations
 
 import re
@@ -24,7 +25,11 @@ def build_table(chunks: list[Chunk], settings: Settings, table_name: str | None 
     """(Re)create the table from chunks, embed them, and build the FTS index."""
     db = connect(settings)
     name = table_name or settings.paths.table_name
-    cache = settings.paths.resolve("processed_dir") / "embed_cache" / f"{re.sub(r'[^A-Za-z0-9._-]+', '_', settings.embedding.model)}.jsonl"
+    cache = (
+        settings.paths.resolve("processed_dir")
+        / "embed_cache"
+        / f"{re.sub(r'[^A-Za-z0-9._-]+', '_', settings.embedding.model)}.jsonl"
+    )
     vectors = embed_documents([c.text for c in chunks], settings.embedding, cache)
     rows = [{**c.as_dict(), "vector": v} for c, v in zip(chunks, vectors)]
     table = db.create_table(name, data=rows, mode="overwrite")

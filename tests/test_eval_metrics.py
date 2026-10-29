@@ -13,7 +13,9 @@ def test_quote_coverage_distinguishes_support():
 
 
 def test_quote_coverage_spans_chunks_only_via_best_segment():
-    two_part = "First supporting sentence about leakage belts. ... Second sentence about SDM scores below 0.25 for covariates."
+    two_part = (
+        "First supporting sentence about leakage belts. ... Second sentence about SDM scores below 0.25 for covariates."
+    )
     chunk = "Second sentence about SDM scores below 0.25 for covariates."
     assert quote_coverage(two_part, chunk) == 1.0
 

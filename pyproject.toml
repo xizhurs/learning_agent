@@ -37,3 +37,17 @@ packages = ["src/rag"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.black]
+line-length = 120
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = [
+    "E501",  # line length is black's job
+    "E741",  # short names such as `l` in comprehensions
+    "E731",  # assigned lambdas
+]

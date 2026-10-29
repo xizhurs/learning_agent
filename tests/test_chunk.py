@@ -12,9 +12,18 @@ def _make_doc() -> DoclingDocument:
     doc.add_text(label=DocItemLabel.TEXT, text="This methodology applies to improved agricultural land management.")
     doc.add_text(label=DocItemLabel.TEXT, text="Projects must demonstrate additionality. " * 80)  # long paragraph
     doc.add_heading("2 Parameters", level=1)
-    cells = [TableCell(text=t, start_row_offset_idx=r, end_row_offset_idx=r + 1,
-                       start_col_offset_idx=c, end_col_offset_idx=c + 1, column_header=(r == 0))
-             for r in range(41) for c, t in enumerate([f"param{r}" if r else "Parameter", f"value{r}" if r else "Value"])]
+    cells = [
+        TableCell(
+            text=t,
+            start_row_offset_idx=r,
+            end_row_offset_idx=r + 1,
+            start_col_offset_idx=c,
+            end_col_offset_idx=c + 1,
+            column_header=(r == 0),
+        )
+        for r in range(41)
+        for c, t in enumerate([f"param{r}" if r else "Parameter", f"value{r}" if r else "Value"])
+    ]
     doc.add_table(data=TableData(num_rows=41, num_cols=2, table_cells=cells))
     return doc
 
@@ -42,7 +51,7 @@ def test_tables_split_by_rows_with_header_repeated():
     assert len(chunks) > 1
     for c in chunks:
         header_row = c.text.split("\n\n", 1)[1].splitlines()[0]
-        assert "Parameter" in header_row and "Value" in header_row   # header repeated in every part
+        assert "Parameter" in header_row and "Value" in header_row  # header repeated in every part
         assert all(line.startswith("|") for line in c.text.splitlines()[2:] if line.strip())  # no mid-row cuts
     all_text = "\n".join(c.text for c in chunks)
-    assert "param40" in all_text                              # no rows lost
+    assert "param40" in all_text  # no rows lost

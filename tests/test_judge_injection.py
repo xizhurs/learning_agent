@@ -13,7 +13,7 @@ def _reset_judge_models():
 def test_injected_judge_llm_is_used_without_a_hosted_key(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     s = Settings()
-    with pytest.raises(SystemExit):                    # configured hosted judge needs its key
+    with pytest.raises(SystemExit):  # configured hosted judge needs its key
         run_eval.build_judge_llm(s)
     llm = object()
     run_eval.set_judge_models(llm=llm)

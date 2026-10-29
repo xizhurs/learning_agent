@@ -19,7 +19,8 @@ def test_apply_judge_scope_keeps_only_eligible_and_filters_retrieval():
     s = Settings()
     s.eval.judge_allowed_source = PDF
     items, extra = apply_judge_scope(
-        [item("a"), item("b", source=PD), item("c", type_="multi_passage"), item("d", answerable=False, source="")], s)
+        [item("a"), item("b", source=PD), item("c", type_="multi_passage"), item("d", answerable=False, source="")], s
+    )
     assert [i["id"] for i in items] == ["a"]
     assert s.retrieval.source_filter == PDF and extra["ragas_scope"] == PDF
 
@@ -33,15 +34,32 @@ def test_variant_slug_and_overrides():
 
 
 def test_format_table_orders_by_mrr_and_shows_latency():
-    out = format_table([("slow", {"mrr": 0.5, "hit@1": 0.4, "latency_s": {"generate": {"median": 40.0}, "total": {"median": 41.0}}}),
-                        ("best", {"mrr": 0.9, "hit@1": 0.8, "faithfulness": 0.7})])
+    out = format_table(
+        [
+            (
+                "slow",
+                {"mrr": 0.5, "hit@1": 0.4, "latency_s": {"generate": {"median": 40.0}, "total": {"median": 41.0}}},
+            ),
+            ("best", {"mrr": 0.9, "hit@1": 0.8, "faithfulness": 0.7}),
+        ]
+    )
     lines = out.splitlines()
     assert lines[1].startswith("best") and lines[2].startswith("slow") and "faith" in lines[0] and "40.0" in lines[2]
 
 
 def test_score_ragas_refuses_a_run_containing_pd_rows(tmp_path, monkeypatch):
-    rows = [{"id": "x", "source": PD, "type": "factual", "answerable": True, "answer": "a", "question": "q",
-             "reference_answer": "r", "retrieved": [{"id": f"{PD}::00001", "text": "secret"}]}]
+    rows = [
+        {
+            "id": "x",
+            "source": PD,
+            "type": "factual",
+            "answerable": True,
+            "answer": "a",
+            "question": "q",
+            "reference_answer": "r",
+            "retrieved": [{"id": f"{PD}::00001", "text": "secret"}],
+        }
+    ]
     (tmp_path / "items.jsonl").write_text(json.dumps(rows[0]), encoding="utf-8")
     (tmp_path / "summary.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("GEMINI_API_KEY", "not-a-real-key")
