@@ -13,7 +13,7 @@
 # MAGIC the repo branch `qasper-corpus` must be on GitHub with this notebook. The notebook clones the code, copies the run folders to local
 # MAGIC disk, scores them there, and copies the scored folders to `<data_dir>/results_ragas/`.
 # MAGIC
-# MAGIC **Caveats:** the judge here (GPT OSS 120B) differs from the Gemini judge of the earlier QASPER runs, and the embeddings differ from
+# MAGIC **Caveats:** the judge here (Llama 3.3 70B Instruct; an earlier GPT OSS 120B attempt hit the workspace request-rate limit) differs from the Gemini judge of the earlier QASPER runs, and the embeddings differ from
 # MAGIC local `nomic-embed-text`, so scores are not comparable with those; rerank on vs off is still a fair comparison. A re-run keeps the scores
 # MAGIC already saved and only completes missing ones, so an interrupted or rate-limited run can simply be started again.
 
@@ -22,9 +22,9 @@
 dbutils.widgets.text("data_dir", "/Volumes/workspace/default/documents/carbon_eval", "Volume folder with the data")
 dbutils.widgets.text("gen_off", "20261029-074316_gen_1024idx_hybrid_rr-off_testset_val", "generation run folder (rerank off)")
 dbutils.widgets.text("gen_on", "20261029-074405_gen_1024idx_hybrid_rr-on_testset_val", "generation run folder (rerank on)")
-dbutils.widgets.text("judge_endpoint", "databricks-gpt-oss-120b", "judge chat endpoint")
+dbutils.widgets.text("judge_endpoint", "databricks-meta-llama-3-3-70b-instruct", "judge chat endpoint")
 dbutils.widgets.text("embed_endpoint", "databricks-gte-large-en", "embeddings endpoint (confirm the name in the list below)")
-dbutils.widgets.text("workers", "8", "parallel judge calls")
+dbutils.widgets.text("workers", "4", "parallel judge calls (8 hit the workspace QPS limit on gpt-oss-120b)")
 dbutils.widgets.text("metrics", "", "optional: comma-separated subset of metrics (empty = all)")
 
 # COMMAND ----------
@@ -143,6 +143,32 @@ for name in gen_runs:
     dest = f"{data_dir}/results_ragas/{name}"
     shutil.copytree(f"{runs_dir}/{name}", dest, dirs_exist_ok=True)
     print("copied ->", dest)
+
+# COMMAND ----------
+
+# DBTITLE 1,Reset RAGAS scores
+# Start the RAGAS scoring over (e.g. after switching the judge model): back up the current partially scored run folders to
+# <data_dir>/results_ragas_backup/<timestamp>/, then restore the pristine, unscored files from <data_dir>/results/.
+import json, os, time
+REPO = "/tmp/carbon_methodology"
+data_dir = dbutils.widgets.get("data_dir")
+stamp = time.strftime("%Y%m%d-%H%M%S")
+for r in (dbutils.widgets.get("gen_off"), dbutils.widgets.get("gen_on")):
+    run_dir = f"{REPO}/data/eval/runs/{r}"
+    src_dir = f"{data_dir}/results/{r}"
+    scored = sum(1 for l in open(f"{run_dir}/items.jsonl", encoding="utf-8") if l.strip() and json.loads(l).get("ragas"))
+    if scored:
+        bak = f"{data_dir}/results_ragas_backup/{stamp}/{r}"
+        os.makedirs(bak, exist_ok=True)
+        for f in ("items.jsonl", "config.json", "summary.json"):
+            with open(f"{run_dir}/{f}", "rb") as a, open(f"{bak}/{f}", "wb") as b:
+                b.write(a.read())
+        print(f"backed up {scored} scored rows -> {bak}")
+    for f in ("items.jsonl", "config.json", "summary.json"):
+        with open(f"{src_dir}/{f}", "rb") as a, open(f"{run_dir}/{f}", "wb") as b:
+            b.write(a.read())
+    n = sum(1 for l in open(f"{run_dir}/items.jsonl", encoding="utf-8") if l.strip() and json.loads(l).get("ragas"))
+    print(f"{r}: reset; {n} scored rows remain")
 
 # COMMAND ----------
 
