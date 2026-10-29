@@ -13,15 +13,14 @@
 # MAGIC the repo branch `qasper-corpus` must be on GitHub with this notebook. The notebook clones the code, copies the run folders to local
 # MAGIC disk, scores them there, and copies the scored folders to `<data_dir>/results_ragas/`.
 # MAGIC
-# MAGIC **Caveats:** the judge here (Qwen3-Next 80B Instruct, which scored the val rerank on/off runs; GPT OSS 120B hit the workspace request-rate limit and a Llama 3.3 70B pass was replaced) differs from the Gemini judge of the earlier QASPER runs, and the embeddings differ from
-# MAGIC local `nomic-embed-text`, so scores are not comparable with those; rerank on vs off is still a fair comparison. A re-run keeps the scores
-# MAGIC already saved and only completes missing ones, so an interrupted or rate-limited run can simply be started again.
+# MAGIC **Caveats:** the judge here (Qwen3-Next 80B-A3B; earlier GPT OSS 120B and Llama 3.3 70B attempts hit the workspace request-rate limit) differs from the Gemini judge of the earlier QASPER runs, and the embeddings differ from
+# MAGIC local `nomic-embed-text`, so scores are not comparable with those; rerank on vs off is still a fair comparison. A re-run never loses saved scores (failed jobs write nothing) but re-scores every item; the 'Score missing items only' cell completes rate-limit gaps without re-scoring everything.
 
 # COMMAND ----------
 
 dbutils.widgets.text("data_dir", "/Volumes/workspace/default/documents/carbon_eval", "Volume folder with the data")
-dbutils.widgets.text("gen_off", "20261029-074316_gen_1024idx_hybrid_rr-off_testset_val", "generation run folder (rerank off)")
-dbutils.widgets.text("gen_on", "20261029-074405_gen_1024idx_hybrid_rr-on_testset_val", "generation run folder (rerank on)")
+dbutils.widgets.text("gen_off", "20261029-122512_gen_1024idx_hybrid_rr-off_testset_val", "generation run folder (rerank off)")
+dbutils.widgets.text("gen_on", "20261029-122850_gen_1024idx_hybrid_rr-on_testset_val", "generation run folder (rerank on)")
 dbutils.widgets.text("judge_endpoint", "databricks-qwen3-next-80b-a3b-instruct", "judge chat endpoint")
 dbutils.widgets.text("embed_endpoint", "databricks-gte-large-en", "embeddings endpoint (confirm the name in the list below)")
 dbutils.widgets.text("workers", "4", "parallel judge calls (8 hit the workspace QPS limit on gpt-oss-120b)")
@@ -52,7 +51,11 @@ shutil.copytree(f"{clone_dir}/notebooks", f"{REPO}/notebooks", dirs_exist_ok=Tru
 shutil.copy(f"{clone_dir}/config.yaml", f"{REPO}/config.yaml")
 os.makedirs(f"{REPO}/data/eval/runs", exist_ok=True)
 for r in gen_runs:
-    shutil.copytree(f"{data_dir}/results/{r}", f"{REPO}/data/eval/runs/{r}", dirs_exist_ok=True)
+    scored = f"{data_dir}/results_ragas/{r}"
+    src = scored if os.path.isfile(f"{scored}/items.jsonl") else f"{data_dir}/results/{r}"
+    if src == scored:
+        print(f"{r}: staging the scored copy (delete {scored} for a fresh full re-score)")
+    shutil.copytree(src, f"{REPO}/data/eval/runs/{r}", dirs_exist_ok=True)
 print("staged in", REPO, "| runs:", gen_runs)
 
 # COMMAND ----------
@@ -143,6 +146,61 @@ for name in gen_runs:
     dest = f"{data_dir}/results_ragas/{name}"
     shutil.copytree(f"{runs_dir}/{name}", dest, dirs_exist_ok=True)
     print("copied ->", dest)
+
+# COMMAND ----------
+
+# DBTITLE 1,Score missing items only
+# Score ONLY the items still missing ragas scores: stage just those rows in a __missing twin run folder, score the twin,
+# merge the new scores back into the main run, recompute the summary means, copy to <data_dir>/results_ragas/.
+# Much cheaper and gentler on the endpoint QPS limit than re-running the previous cell, which re-scores every item.
+import argparse, json, time
+from ragas.embeddings import LangchainEmbeddingsWrapper
+from ragas.llms import LangchainLLMWrapper
+from rag.config import get_settings
+from rag.eval import run_eval
+
+os.environ.update({"RAG__TRACING__ENABLED": "false", "RAG__EVAL__JUDGE_MAX_WORKERS": dbutils.widgets.get("workers")})
+get_settings.cache_clear()
+run_eval.set_judge_models(LangchainLLMWrapper(chat, bypass_n=True), LangchainEmbeddingsWrapper(emb))
+
+for name in gen_runs:
+    run_dir = f"{runs_dir}/{name}"
+    rows = [json.loads(l) for l in open(f"{run_dir}/items.jsonl", encoding="utf-8") if l.strip()]
+    ans = [r for r in rows if r.get("answerable") and r.get("answer") is not None]
+    miss = [r for r in ans if not r.get("ragas") or any(v is None for v in r["ragas"].values())]
+    print(f"\n== {name}: {len(miss)} of {len(ans)} items missing scores ==")
+    if not miss:
+        continue
+    twin = f"{runs_dir}/{name}__missing"
+    shutil.rmtree(twin, ignore_errors=True)
+    os.makedirs(twin)
+    for f in ("config.json", "summary.json"):
+        shutil.copy(f"{run_dir}/{f}", f"{twin}/{f}")
+    with open(f"{twin}/items.jsonl", "w", encoding="utf-8") as fh:
+        for r in miss:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    run_eval.cmd_score_ragas(argparse.Namespace(run=twin, metrics=None))
+    scored = {r["id"]: r.get("ragas") or {}
+              for r in (json.loads(l) for l in open(f"{twin}/items.jsonl", encoding="utf-8") if l.strip())}
+    for r in rows:
+        if r["id"] in scored:
+            old = r.get("ragas") or {}
+            r["ragas"] = old | {c: v for c, v in scored[r["id"]].items() if v is not None or old.get(c) is None}
+    with open(f"{run_dir}/items.jsonl", "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    s = json.load(open(f"{run_dir}/summary.json", encoding="utf-8"))
+    ragas_keys = set().union(*(r.get("ragas") or {} for r in ans)) if ans else set()
+    for k in s:
+        if k in ragas_keys:
+            vals = [r["ragas"][k] for r in ans if (r.get("ragas") or {}).get(k) is not None]
+            if vals:
+                s[k] = sum(vals) / len(vals)
+    json.dump(s, open(f"{run_dir}/summary.json", "w", encoding="utf-8"), indent=2)
+    shutil.rmtree(twin, ignore_errors=True)
+    shutil.copytree(run_dir, f"{data_dir}/results_ragas/{name}", dirs_exist_ok=True)
+    still = [r["id"] for r in ans if not r.get("ragas") or any(v is None for v in r["ragas"].values())]
+    print("still missing:", still)
 
 # COMMAND ----------
 
