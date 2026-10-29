@@ -117,6 +117,28 @@ Rerank was kept on by choice (`rerank.enabled: true`); this is what the evidence
 - The reranker reads at most 512 tokens and 10-13% of retrieved chunks are cut, but the gold quote lies beyond the cut in none
   of the 26 truncated gold chunks, so truncation does not explain the small gain.
 
+RAGAS on the two val runs on the 1024 index (Llama 3.1 8B answers), judged by `databricks-qwen3-next-80b-a3b-instruct` with Databricks
+embeddings (`notebooks/score_ragas_databricks.py`), 45 answerable questions each:
+
+| RAGAS metric | rerank off | rerank on | Δ | questions up / down |
+|---|---|---|---|---|
+| faithfulness | 0.651 | 0.708 | +0.057 | 10 / 7 |
+| answer_relevancy | 0.478 | 0.511 | +0.033 | 12 / 9 |
+| context precision (with reference) | 0.781 | 0.804 | +0.023 | 10 / 8 |
+| context_recall | 0.893 | 0.922 | +0.030 | 4 / 1 |
+| factual_correctness (f1) | 0.313 | 0.376 | +0.063 | 15 / 7 |
+| answer_matches_reference | 0.778 | 0.800 | +0.022 | 5 / 4 |
+
+- Rerank on is ahead on all six metrics, in line with the Claude judge (faithfulness up, correctness flat). Only factual_correctness
+  (15 up, 7 down) and context_recall (4 up, 1 down) lean the same way across questions; the others move up and down about equally.
+- RAGAS caveats: one judge (Qwen3-Next 80B for both runs; not the Gemini judge of the QASPER runs, so absolute values are not
+  comparable with those), 45 questions, one scoring pass per run. The `config.json` in the scored folders still lists the
+  config's default Gemini judge: the Databricks judge is injected and not recorded there. The judge was changed during scoring (the
+  GPT OSS 120B attempt hit the workspace request-rate limit, then Llama 3.3 70B was tried), and these values come from the final pass. An
+  earlier pass with another judge gave rerank-off scores that differ by 0.00-0.012 per metric (e.g. faithfulness 0.639 vs 0.651,
+  factual_correctness 0.303 vs 0.313). That is a rough sense of how much the numbers move with the judge; the on-off gaps (0.02-0.06) are only a
+  few times larger, so read them as a consistent small lean, not a measured effect.
+
 Caveats:
 - One judge (Claude, one pass), one run per variant, no repeat runs to estimate run-to-run noise (Ollama determinism at
   temperature 0 was not tested), and small n: a 0.02-0.05 gap is one or two questions. The judge packet shows each context cut at 1500 characters.
@@ -125,7 +147,7 @@ Caveats:
   `config.json` still says 1024. For a real 1024 run set `RAG__PATHS__TABLE_NAME=chunks_heading_aware_1024_128` and
   `RAG__CHUNKING__OVERLAP=128` (only the `*_1024idx_*` runs did).
 - Rows are not comparable across generators (local llama3.2:3b vs Llama 3.1 8B); compare on vs off within a row only.
-- Not done: the held-out test set, RAGAS on these runs, and any 1024 vs 512 index comparison with generation.
+- Not done: the held-out test set, RAGAS on the dev and the 512-index runs, and any 1024 vs 512 index comparison with generation.
 - Runs: `data/eval/runs/20261027-182323_gen_1024_hybrid_rr-off_testset_dev` / `20261027-203606_gen_1024_hybrid_rr-on_testset_dev`,
   `20261028-093028_gen_1024_hybrid_rr-off_testset_val` / `20261028-100055_gen_1024_hybrid_rr-on_testset_val`, and
   `20261029-074316_gen_1024idx_hybrid_rr-off_testset_val` / `20261029-074405_gen_1024idx_hybrid_rr-on_testset_val` (retrieval:
