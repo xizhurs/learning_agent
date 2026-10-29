@@ -23,6 +23,28 @@ ollama pull nomic-embed-text llama3.2:3b
 Tracked changes in the DOCX are accepted before parsing (`src/rag/ingest/docx_clean.py`).
 Changing `chunking.*` or `embedding.*` requires re-running `rag.ingest`.
 
+## Dataset: QASPER tiny (current corpus)
+`uv run python scripts/create_qasper_tiny.py` downloads QASPER (allenai/qasper, CC BY 4.0; validation + test splits) into
+`data/raw/qasper/` and writes:
+- `data/documents/<paper id>.md`: 200 NLP papers (`#` title, `##` sections, `###` subsections), parsed without Docling.
+  100 are the papers the questions are about, 100 are random distractors.
+- `data/eval/qasper_tiny/{dev,val,test}.jsonl`: 100 questions, one per paper (dev 32+8, val 24+6, test 24+6
+  answerable + unanswerable). Plus `contexts.jsonl`, `manifest.json` and `sample_preview.md`.
+
+How questions are chosen:
+- At least two annotators, all agreeing on answerable vs. unanswerable.
+- Answerable questions need text evidence; a table or figure alone does not count.
+- Each question is prefixed with its paper's title, because QASPER questions ("which datasets do they use?") are ambiguous
+  across papers. That makes document-level `hit@k` easy, so tune on `answer_hit@k`: an annotator evidence paragraph found
+  in a retrieved chunk.
+
+Workflow:
+1. Run `uv run python -m rag.ingest`. It reuses embeddings cached in `data/processed/embed_cache/`, so an interrupted
+   run resumes.
+2. Evaluate with `uv run python -m rag.eval.run_eval run --retrieval-only --testset qasper_tiny/dev`.
+
+The QASPER ablation is in "Results" below. The earlier TechQA corpus is archived in `data/archive/techqa/`.
+
 ## Evaluation (ground truth and answer judging by Claude in the Claude app)
 1. `uv run python -m rag.eval.gen_testset export` writes `data/eval/packets/packet_NN.md`.
 2. Paste each `.md` packet into the Claude app (one chat each). Save the JSON-only reply as
@@ -43,30 +65,93 @@ disjoint from the dev set) and lands in `data/eval/testset_holdout.jsonl`.
 
 Retrieval hit@k is matched on the supporting quote text, so it stays valid when chunking changes.
 
-## Results (retrieval-only, 54 dev / 69 held-out answerable questions)
-Dev ablation (`data/eval/runs/*_ablation_testset.json`), 512-token chunks:
+## Results (QASPER dev: 32 answerable + 8 unanswerable questions)
+Ablation of chunk size x search mode x rerank (`data/eval/runs/20261012-192903_ablation_qasper_tiny_dev`). Tune on
+`answer_mrr` / `answer_hit@k` (an annotator evidence paragraph found in a retrieved chunk). The plain `mrr` / `hit@k`
+columns are document-level and trivially 1.0, because every question is prefixed with its paper's title.
 
-| Search | Rerank | MRR | hit@1 | hit@3 | hit@5 | time / 60 questions |
+| Chunk | Search | Rerank | answer_mrr | answer_hit@1 | answer_hit@5 | evidence_recall@5 |
 |---|---|---|---|---|---|---|
-| keyword (FTS) | off | **0.835** | 0.722 | 0.944 | 0.963 | ~1 s |
-| hybrid | on | 0.785 | 0.685 | 0.907 | 0.963 | ~1000 s |
-| vector | on | 0.778 | 0.685 | 0.870 | 0.926 | ~1000 s |
-| hybrid | off | 0.727 | 0.611 | 0.815 | 0.889 | ~6 s |
-| vector | off | 0.602 | 0.500 | 0.685 | 0.741 | ~5 s |
+| 1024 | any | on | **0.623** | 0.469 | 0.906 | 0.770 |
+| 512 | any | on | 0.607 | 0.469 | 0.906 | 0.785-0.793 |
+| 256 | any | on | 0.46 | 0.344 | 0.69-0.72 | 0.56-0.59 |
+| 1024 | fts | off | 0.359 | 0.156 | 0.812 | 0.645 |
+| 512 | vector / fts / hybrid | off | 0.321 / 0.295 / 0.287 | 0.19 / 0.09 / 0.13 | 0.625 / 0.656 / 0.656 | 0.49 / 0.48 / 0.53 |
+| 256 | vector / fts / hybrid | off | 0.241 / 0.251 / 0.222 | 0.13 / 0.09 / 0.13 | 0.50 / 0.56 / 0.41 | 0.43 / 0.40 / 0.31 |
 
-Chunk size (256 / 512 / 1024) made little difference for keyword search (MRR 0.845 / 0.835 / 0.836). Reranking lowered
-keyword-search scores and only helped vector search, at about 15 s per query on CPU.
+- **Reranking is the big win on QASPER** (the opposite of TechQA): at 512-1024 tokens it roughly doubles `answer_mrr`
+  and lifts `answer_hit@5` to 0.91. After reranking, search mode makes no difference at 512 or 1024: the 30 candidates
+  already contain the answer chunks and the cross-encoder decides the order, so cheap FTS is the first stage.
+- 256-token chunks are clearly worse. 512 vs 1024 is within noise (one question is 0.03 of hit rate on 32 questions), so
+  the default stays at 512 to avoid re-ingesting.
+- Cost: reranking takes about 15 s/query at 256 tokens and about 40 s/query at 1024 on this CPU (about 1 s without).
 
-Held-out confirmation: keyword, no rerank, 512 gave MRR **0.850** (hit@1 0.797, hit@5 0.957) versus 0.710 for the old
-hybrid + rerank default. The default in `config.yaml` is therefore `mode: fts`, `rerank.enabled: false`.
-
-Caveat: both test sets were written by Claude from the passages themselves, so questions share exact wording with the
-supporting text, which favours keyword matching. Real user questions that paraphrase may do better with `hybrid` (set
-`RAG__RETRIEVAL__MODE=hybrid`). Differences under about 0.05 MRR on ~60 questions are noise.
+Generation + RAGAS on the 1024 / fts / rerank-on config (`data/eval/runs/20261012-233735_ragas_fts_1024_rr_qasper_tiny_dev`,
+llama3.2:3b answers, `gemini-3.5-flash-lite` judge): faithfulness 0.90, answer relevancy 0.75, context precision 0.53,
+context recall 0.65, factual correctness 0.11; `answer_f1` 0.22, no false refusals on answerable questions, but the model
+refuses only 25% of unanswerable ones (`not_found_accuracy` 0.85). Median latency 95 s/question (rerank 39 s, generate
+56 s). The low factual correctness / F1 mostly reflects the 3B model's long answers against QASPER's short references.
+Six of 160 RAGAS jobs failed on Gemini's free-tier daily quota (500 requests/model/day), so those scores cover slightly
+fewer items. Not yet run: the val / test splits for a final check.
 
 A `rerank.min_score` refusal threshold does not work: the near-topic unanswerable questions get reranker scores of
 0.96 to 0.999, the same range as answerable ones (clearly off-topic queries do score near 0). Refusal is left to the
 generator prompt and is measured with generation runs (`refusal_rate_on_unanswerable`).
+
+## Results (carbon corpus: rerank on vs off)
+Four public documents (VM0047, VCS Standard v5.0, VMD0054, VT0008), Claude-written questions: dev 70 (65 answerable) and val 50
+(45 answerable). Hybrid search, `candidates_k` 30, `top_k` 5. Answers judged 1-5 by Claude in the Claude app (`export-judge`).
+Rerank was kept on by choice (`rerank.enabled: true`); this is what the evidence says about it:
+
+| Split, index, generator | MRR off -> on | evidence_recall@5 off -> on | judge faithfulness | judge correctness |
+|---|---|---|---|---|
+| dev, 512 index*, llama3.2:3b (local) | 0.832 -> 0.835 | 0.962 -> 0.933 | 4.60 -> 4.54 | 4.10 -> 4.01 |
+| val, 512 index*, llama3.2:3b (local) | 0.789 -> 0.837 | 0.889 -> 0.933 | 3.86 -> 4.04 | 3.52 -> 3.50 |
+| val, 1024 index, Llama 3.1 8B (Databricks endpoint) | 0.804 -> 0.819 | 0.885 -> 0.911 | 4.36 -> 4.58 | 4.08 -> 4.08 |
+
+- Rerank on helps retrieval a little on val (MRR +0.015 to +0.05, evidence_recall@3 +0.07 to +0.11) and not on dev
+  (evidence_recall@5 -0.03). Judge faithfulness is +0.18 / +0.22 on the two val runs and -0.06 on dev.
+- **Answer correctness did not improve in any run** (-0.09 to 0.00). On val with Llama 3.1 8B it changed on 10 of 50 questions,
+  5 up and 5 down. The remaining errors look like generator errors (hallucinated numbers, a leading "Yes", wrong table row).
+- Cost: reranking is about 17-26 s/query on this CPU (median per question with the 3B model: 34 s off, 55-59 s on).
+- The reranker reads at most 512 tokens and 10-13% of retrieved chunks are cut, but the gold quote lies beyond the cut in none
+  of the 26 truncated gold chunks, so truncation does not explain the small gain.
+
+RAGAS on the two val runs on the 1024 index (Llama 3.1 8B answers), judged by `databricks-qwen3-next-80b-a3b-instruct` with Databricks
+embeddings (`notebooks/score_ragas_databricks.py`), 45 answerable questions each:
+
+| RAGAS metric | rerank off | rerank on | Δ | questions up / down |
+|---|---|---|---|---|
+| faithfulness | 0.651 | 0.708 | +0.057 | 10 / 7 |
+| answer_relevancy | 0.478 | 0.511 | +0.033 | 12 / 9 |
+| context precision (with reference) | 0.781 | 0.804 | +0.023 | 10 / 8 |
+| context_recall | 0.893 | 0.922 | +0.030 | 4 / 1 |
+| factual_correctness (f1) | 0.313 | 0.376 | +0.063 | 15 / 7 |
+| answer_matches_reference | 0.778 | 0.800 | +0.022 | 5 / 4 |
+
+- Rerank on is ahead on all six metrics, in line with the Claude judge (faithfulness up, correctness flat). Only factual_correctness
+  (15 up, 7 down) and context_recall (4 up, 1 down) lean the same way across questions; the others move up and down about equally.
+- RAGAS caveats: one judge (Qwen3-Next 80B for both runs; not the Gemini judge of the QASPER runs, so absolute values are not
+  comparable with those), 45 questions, one scoring pass per run. The `config.json` in the scored folders still lists the
+  config's default Gemini judge: the Databricks judge is injected and not recorded there. The judge was changed during scoring (the
+  GPT OSS 120B attempt hit the workspace request-rate limit, then Llama 3.3 70B was tried), and these values come from the final pass. An
+  earlier pass with another judge gave rerank-off scores that differ by 0.00-0.012 per metric (e.g. faithfulness 0.639 vs 0.651,
+  factual_correctness 0.303 vs 0.313). That is a rough sense of how much the numbers move with the judge; the on-off gaps (0.02-0.06) are only a
+  few times larger, so read them as a consistent small lean, not a measured effect.
+
+Caveats:
+- One judge (Claude, one pass), one run per variant, no repeat runs to estimate run-to-run noise (Ollama determinism at
+  temperature 0 was not tested), and small n: a 0.02-0.05 gap is one or two questions. The judge packet shows each context cut at 1500 characters.
+- \* The dev runs and the first val runs were labelled 1024 but used the 512 index. `RAG__CHUNKING__MAX_TOKENS=1024` changes only
+  the saved settings, not `paths.table_name`, and table `chunks` is text-for-text identical to `chunks_heading_aware_512_64`. Their
+  `config.json` still says 1024. For a real 1024 run set `RAG__PATHS__TABLE_NAME=chunks_heading_aware_1024_128` and
+  `RAG__CHUNKING__OVERLAP=128` (only the `*_1024idx_*` runs did).
+- Rows are not comparable across generators (local llama3.2:3b vs Llama 3.1 8B); compare on vs off within a row only.
+- Not done: the held-out test set, RAGAS on the dev and the 512-index runs, and any 1024 vs 512 index comparison with generation.
+- Runs: `data/eval/runs/20261027-182323_gen_1024_hybrid_rr-off_testset_dev` / `20261027-203606_gen_1024_hybrid_rr-on_testset_dev`,
+  `20261028-093028_gen_1024_hybrid_rr-off_testset_val` / `20261028-100055_gen_1024_hybrid_rr-on_testset_val`, and
+  `20261029-074316_gen_1024idx_hybrid_rr-off_testset_val` / `20261029-074405_gen_1024idx_hybrid_rr-on_testset_val` (retrieval:
+  `20261028-140242_ret_1024idx_…` / `20261028-140306_ret_1024idx_…`).
 
 ## RAGAS (optional)
 `run_eval run --ragas` scores faithfulness, answer relevancy, context precision/recall and factual correctness with a

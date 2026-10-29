@@ -1,4 +1,5 @@
-"""Parse PDF / DOCX (Docling, cached as JSON so re-chunking doesn't re-parse) and plain-text technotes into Docling documents."""
+"""Parse PDF / DOCX (Docling, cached as JSON so re-chunking doesn't re-parse), plain-text technotes and Markdown papers into
+Docling documents."""
 from __future__ import annotations
 
 import re
@@ -14,7 +15,7 @@ from docling_core.types.doc.labels import DocItemLabel
 from rag.config import Settings
 from rag.ingest.docx_clean import accept_tracked_changes
 
-SUPPORTED = {".pdf", ".docx", ".txt"}
+SUPPORTED = {".pdf", ".docx", ".txt", ".md"}
 
 
 def _converter() -> DocumentConverter:
@@ -63,10 +64,48 @@ def parse_text_document(path: Path) -> DoclingDocument:
     return doc
 
 
+HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
+
+
+def parse_markdown_document(path: Path) -> DoclingDocument:
+    """Markdown paper (as written by scripts/create_qasper_tiny.py) -> DoclingDocument without Docling: the first '# x' -> title,
+    '## x' / '### x' ... -> section headings of level 1 / 2 ..., blank-line separated paragraphs -> text. A leading '\\#' is a
+    literal '#'. The document is named after the file so chunk ids stay '<file name>::NNNNN'."""
+    raw = path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    doc = DoclingDocument(name=path.name)
+    para: list[str] = []
+    titled = False
+
+    def flush() -> None:
+        if para:
+            doc.add_text(label=DocItemLabel.TEXT, text="\n".join(para))
+            para.clear()
+
+    for line in raw.split("\n"):
+        s = line.strip()
+        m = HEADING.match(s)
+        if not s:
+            flush()
+        elif m:
+            flush()
+            level, text = len(m.group(1)), m.group(2)
+            if level == 1 and not titled:
+                doc.add_title(text)
+                titled = True
+            else:
+                doc.add_heading(text, level=max(level - 1, 1))
+        else:
+            para.append(s.removeprefix("\\") if s.startswith("\\#") else s)
+    flush()
+    return doc
+
+
 def parse_document(path: Path, settings: Settings, force: bool = False) -> DoclingDocument:
-    """Return the DoclingDocument for `path`, using data/processed/<name>.docling.json as a cache (not used for .txt)."""
+    """Return the DoclingDocument for `path`, using data/processed/<name>.docling.json as a cache (not used for .txt / .md)."""
     if path.suffix.lower() == ".txt":
         return parse_text_document(path)
+    if path.suffix.lower() == ".md":
+        return parse_markdown_document(path)
     processed = settings.paths.resolve("processed_dir")
     processed.mkdir(parents=True, exist_ok=True)
     cache = processed / f"{path.stem}.docling.json"

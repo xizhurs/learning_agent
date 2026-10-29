@@ -37,7 +37,8 @@ Rules
    factual, numeric (a value/threshold/equation parameter), definition, requirement/procedure, and
    table lookup (only for passages that are tables).
 2. Write ONE "multi_passage" question that needs information from exactly two of the passages.
-3. Write ONE "unanswerable" question: plausible for these documents but NOT answered by any passage below.
+3. Write ONE "unanswerable" question: plausible for these documents but NOT answered by any passage below. Make it a
+   near miss: on the same topic as one of the passages, asking for a specific value or detail that the passages do not state.
 4. Every question must be fully self-contained, as a user would type it into a chatbot with no passage
    in front of them. Never say "the passage", "this section", "P3", "the text above" or similar. Name the
    methodology / concept explicitly instead of using pronouns.
@@ -46,6 +47,10 @@ Rules
 6. quote: 1-3 sentences (or table rows) copied VERBATIM from the passage that support the answer. For
    multi_passage give the quotes of both passages joined with " ... ". For unanswerable use "".
 7. passage_ids: list of passage ids used, e.g. ["P3"]; [] for unanswerable.
+8. Wording: do not reuse rare content words, number formats or any phrase of three or more consecutive words from the
+   passage in the question. Use everyday synonyms and write as a validator or project developer who has not read the
+   document would. Keep proper names the question needs (VM0047, VMD0054, VT0008, VCS Standard) and variable symbols. Vary the form: short
+   questions, scenario or conditional questions, comparisons. The quote (rule 6) must still be copied verbatim.
 
 JSON schema for each element:
 {{"question": str, "reference_answer": str, "passage_ids": [str], "quote": str,
@@ -93,7 +98,7 @@ def _candidate_passages(settings) -> list[dict]:
         doc = parse_document(path, settings)
         for c in chunk_document(doc, CHUNKING_FOR_PASSAGES):
             body = c.text
-            if count_tokens(body) < 60:
+            if count_tokens(body) < 60 or len(_norm(body)) < 60:   # second test drops separator-only tables
                 continue
             if body.count("....") >= 3 or "contents" in c.section.lower():
                 continue
@@ -124,6 +129,9 @@ def export(packets: int, per_packet: int, seed: int, set_name: str = "") -> None
         texts = [p for p in ps if p["kind"] != "table"]
         n_tab = min(len(tables), max(1, per_source // 4))
         chosen += rng.sample(tables, n_tab) + rng.sample(texts, min(len(texts), per_source - n_tab))
+    if len(chosen) < need:   # a small source ran out of its share (e.g. text passages used by earlier sets): top up from the rest
+        rest = [p for p in pool if p not in chosen]
+        chosen += rng.sample(rest, min(len(rest), need - len(chosen)))
     rng.shuffle(chosen)
     chosen = chosen[:need]
 

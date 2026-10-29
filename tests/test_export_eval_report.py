@@ -90,7 +90,7 @@ def test_sheets_columns_and_summary_values(runs):
     assert (a["context_recall_at_1"], a["context_recall_at_3"], a["context_recall_at_5"]) == (0.5, 0.5, 0.75)
     assert a["mrr"] == pytest.approx(0.5625) and a["recall_basis"] == "document"
     assert a["not_found_accuracy"] == 0.5                       # q5 refused, q4 answered
-    assert a["faithfulness_avg"] == pytest.approx(0.55)         # q1 0.9, q6 0.2
+    assert a["ragas_faithfulness"] == pytest.approx(0.55)       # q1 0.9, q6 0.2
     assert a["answer_accuracy"] == pytest.approx(0.5)           # q1 correct, q6 correct; q2 and q3 refused (wrong); -> 2/4
     assert a["avg_latency_sec"] == 2.0 and a["estimated_cost"] == 0.0
     b = s.loc["20261011-100000_ablation_mytest/heading_aware_256_vector_rr-on"]
@@ -225,3 +225,67 @@ def test_citation_check():
     assert exp.citation_check("A [5].", retrieved, ["d1.txt"]) is False       # out of range
     assert exp.citation_check("A without citation", retrieved, ["d1.txt"]) is False
     assert exp.citation_check(NOT_FOUND, retrieved, ["d1.txt"]) is None and exp.citation_check(None, retrieved, []) is None
+
+
+def test_summary_has_qasper_metrics_and_leaves_them_empty_for_old_runs(runs):
+    quote = "alpha beta gamma delta epsilon"
+    hit = chunk("d1.txt", text="intro then alpha beta gamma delta epsilon and more")
+    miss = chunk("d9.txt", text="nothing relevant here at all")
+    rows = [row("a", retrieved=[miss, hit], rank=1, answer_rank=2, answer="Set X [1].", reference_answer="set x", reference_quote=quote,
+                timings={"retrieve": 1.0, "rerank": 0.8, "generate": 3.0},
+                ragas={"answer_relevancy": 0.7, "context_recall": 1.0, "llm_context_precision_with_reference": 0.5,
+                       "factual_correctness(mode=f1)": None}),
+            row("b", retrieved=[miss, hit], rank=1, answer_rank=None, answer=NOT_FOUND, reference_quote=quote,
+                timings={"retrieve": 3.0, "rerank": 1.2, "generate": 5.0}),
+            row("c", answerable=False, gold=(), retrieved=[miss], answer=NOT_FOUND, timings={"retrieve": 2.0, "rerank": 1.0, "generate": 4.0}),
+            row("d", answerable=False, gold=(), retrieved=[miss], answer="Some answer.", timings={})]
+    write_run(runs / "qasper", rows)
+    frames, _ = exp.build_report(runs, only="qasper", commit="")
+    s = frames["summary_by_run"].iloc[0]
+    assert s["answer_mrr"] == pytest.approx(0.25)                              # a: 1/2, b: miss -> (0.5 + 0) / 2
+    assert (s["evidence_recall_at_1"], s["evidence_recall_at_3"], s["evidence_recall_at_5"]) == (0.0, 1.0, 1.0)   # hit at rank 2
+    assert s["context_precision"] == pytest.approx(0.5)                        # relevant chunk at rank 2: precision@2 = 1/2
+    assert s["answer_f1"] == pytest.approx(0.5)                                # a: 1.0, b: refusal text vs "ref answer" -> 0
+    assert s["refusal_rate_on_unanswerable"] == 0.5 and s["false_refusal_rate_on_answerable"] == 0.5
+    assert s["ragas_answer_relevancy"] == pytest.approx(0.7) and s["ragas_n"] == 1
+    assert pd.isna(s["ragas_factual_correctness"])                             # a failed RAGAS job is skipped, not counted as 0
+    assert s["median_rerank_sec"] == pytest.approx(1.0) and s["median_generate_sec"] == pytest.approx(4.0)
+    pq = frames["per_question_results"].set_index("question_id")
+    assert pq.loc["a", "answer_f1"] == pytest.approx(1.0) and pq.loc["a", "evidence_recall_at_1"] == 0.0
+    assert pd.isna(pq.loc["c", "context_precision"]) and pd.isna(pq.loc["c", "answer_f1"])
+
+    old = exp.build_report(runs, only="*256_vector*", commit="")[0]["summary_by_run"].iloc[0]     # no answers, answer_rank or ragas
+    assert all(pd.isna(old[c]) for c in ("answer_mrr", "answer_f1", "ragas_n", "refusal_rate_on_unanswerable", "median_rerank_sec"))
+
+
+def test_answer_correctness_prefers_the_ragas_critic_over_factual_correctness_f1(tmp_path):
+    f1_zero = {"faithfulness": 0.9, "factual_correctness(mode=f1)": 0.0}
+    rows = [row("yes", answer="Yes, according to passage [1], they do.", reference_answer="Yes", retrieved=[chunk("d1.txt")], rank=1,
+                ragas=f1_zero | {"answer_matches_reference": 1.0}),                      # right answer, F1 punishes the extra words
+            row("wrong", answer="No, they do not [1].", reference_answer="Yes", retrieved=[chunk("d1.txt")], rank=1,
+                ragas=f1_zero | {"answer_matches_reference": 0.0}),
+            row("old", answer="Yes, they do [1].", reference_answer="Yes", retrieved=[chunk("d1.txt")], rank=1, ragas=f1_zero),
+            row("refused", answer=NOT_FOUND, retrieved=[chunk("d1.txt")], rank=1,
+                ragas=f1_zero | {"answer_matches_reference": 1.0})]
+    write_run(tmp_path / "runs" / "r", rows)
+    frames, _ = exp.build_report(tmp_path / "runs", commit="")
+    pq = frames["per_question_results"].set_index("question_id")
+    assert list(pq.loc[["yes", "wrong", "old", "refused"], "answer_correct"]) == [True, False, False, False]
+    assert list(pq.loc[["yes", "wrong", "old", "refused"], "correct_source"]) == ["ragas", "ragas", "ragas_factual_correctness", "refusal"]
+    assert pq.loc["yes", "failure_type"] == "ok" and pq.loc["wrong", "failure_type"] == "wrong_answer"
+    assert pq.loc["old", "failure_type"] == "wrong_answer"                              # old runs keep the f1 fallback
+    fail = frames["failure_analysis"].set_index("question_id")
+    assert "answer_matches_reference 0" in fail.loc["wrong", "diagnosis"]
+    s = frames["summary_by_run"].iloc[0]
+    assert s["ragas_answer_matches_reference"] == pytest.approx(0.667, abs=1e-3)     # yes 1, wrong 0, refused 1 (not excluded: it is scored)
+    assert s["ragas_factual_correctness"] == 0.0 and s["answer_accuracy"] == 0.25
+
+
+def test_claude_judge_score_stays_separate_from_ragas_columns(tmp_path):
+    run = tmp_path / "runs" / "r"
+    write_run(run, [row("a", answer="Set X [1].", retrieved=[chunk("d1.txt")], rank=1,
+                        ragas={"faithfulness": 0.8, "answer_matches_reference": 0.0})])
+    (run / "judge_reply.json").write_text(json.dumps([{"id": "a", "correctness": 5}]), encoding="utf-8")
+    pq = exp.build_report(tmp_path / "runs", commit="")[0]["per_question_results"].iloc[0]
+    assert pq["claude_correctness_score"] == 1.0 and pq["ragas_answer_matches_reference"] == 0.0
+    assert pq["answer_correct"] == True and pq["correct_source"] == "claude"       # noqa: E712  (judge replies outrank RAGAS)

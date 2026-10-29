@@ -1,0 +1,13 @@
+# RAGAS scoring on the Databricks serverless environment (Python 3.12, aarch64), installed with
+# `pip install -r databricks-requirements-ragas.txt -c databricks-constraints.txt`. Top-level pins only; pip resolves the rest
+# (about 150 packages, notebook-scoped) without changing any version listed in databricks-constraints.txt.
+# Resolved with uv pip compile for that platform: ragas 0.4.3 (as in the local runs), langchain 1.4.7, openai 2.54.0.
+# unitycatalog-langchain is pinned explicitly (it arrives via databricks-langchain): left floating alongside
+# langchain-community 0.3.x, pip backtracks to 0.2.0, which imports langchain_core.pydantic_v1 — removed in
+# langchain-core 1.x (ModuleNotFoundError from databricks_langchain's __init__). 0.3.0 is the first fixed release
+# and requires langchain-community >= 0.4.0, hence the bump from 0.3.31.
+ragas==0.4.3
+langchain-community==0.4.1
+unitycatalog-langchain==0.3.0
+databricks-langchain==0.8.2
+openai==2.54.0

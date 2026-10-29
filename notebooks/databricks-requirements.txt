@@ -1,0 +1,8 @@
+# Installed on top of the Databricks serverless environment (see databricks-constraints.txt for what is already there).
+# openai 3.x needs a newer idna than serverless has, so the newest openai that resolves against the serverless versions is pinned.
+# `uv pip compile ... --python-version 3.12 --python-platform aarch64-manylinux_2_28` resolves this set without changing any
+# preinstalled package. tqdm 4.70.1 was also resolved; it is left unpinned here because serverless probably has it already.
+openai==2.54.0
+distro==1.9.0
+jiter==0.18.0
+tqdm

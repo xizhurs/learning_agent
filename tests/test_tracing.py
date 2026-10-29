@@ -138,4 +138,4 @@ def test_latency_summary_and_no_key_in_settings():
     out = latency_summary([{"generate": 10.0, "total": 11.0}, {"generate": 30.0, "total": 31.0}, {"generate": 20.0}, None])
     assert out["generate"] == {"median": 20.0, "p95": 30.0, "max": 30.0, "n": 3} and out["total"]["n"] == 2
     snap = json.loads(Settings().model_dump_json())["tracing"]
-    assert snap == {"enabled": True, "endpoint": "http://localhost:6006/v1/traces", "project_name": "techqa-rag"}
+    assert snap == {"enabled": True, "endpoint": "http://localhost:6006/v1/traces", "project_name": "qasper-rag"}

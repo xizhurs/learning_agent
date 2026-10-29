@@ -22,13 +22,13 @@ embedding:
   batch_size: 32
 
 retrieval:
-  mode: fts                 # vector | fts | hybrid  (dev ablation winner; see README. Confirm on the held-out set)
+  mode: fts                 # vector | fts | hybrid  (not yet compared on the carbon corpus; see rag.eval.ablate)
   candidates_k: 30          # how many chunks to pull before reranking
   top_k: 5                  # chunks finally passed to the LLM (after rerank, or truncation if rerank off)
-  source_filter: null       # e.g. "swg21197705.txt" to restrict to one document
+  source_filter: null       # e.g. "VM0047-v1.1_Final.pdf" to restrict to one document
 
 rerank:
-  enabled: false            # reranking hurt FTS and costs ~15 s/query on CPU; helps vector-only search
+  enabled: true             # kept on: better val retrieval and judge faithfulness, no gain in answer correctness; ~17-26 s/query on CPU (README, carbon corpus)
   model: BAAI/bge-reranker-base   # cross-encoder, runs on CPU
   min_score: null           # drop chunks scoring below this (sigmoid-scale 0-1); null = keep all
 
@@ -48,7 +48,7 @@ eval:
   judge_model: gemini-3.5-flash-lite   # confirm with: python -m rag.eval.run_eval check-judge
   judge_base_url: https://generativelanguage.googleapis.com/v1beta/openai/
   judge_api_key_env: GEMINI_API_KEY
-  judge_allowed_source: null          # null = public corpus (TechQA, Apache-2.0), nothing restricted; set a file name to send ONLY that document to the hosted judge
+  judge_allowed_source: null          # null = nothing restricted (VM0047 and the PD draft may both reach the hosted judge); set a file name to send ONLY that document to the hosted judge
   judge_max_workers: 2                # keep low: free tiers have tight rate limits
   judge_reasoning_effort: low         # low | none | minimal ...: less 'thinking' = faster judge calls; pick via check-judge
   judge_min_interval_s: 0             # >0 spaces hosted-judge requests (set from the rate `check-judge` measures)
@@ -59,4 +59,4 @@ tracing:
   # Local Arize Phoenix (start it with `phoenix serve`, UI at http://localhost:6006). Skipped automatically if not running.
   enabled: true
   endpoint: http://localhost:6006/v1/traces
-  project_name: techqa-rag
+  project_name: carbon-rag
