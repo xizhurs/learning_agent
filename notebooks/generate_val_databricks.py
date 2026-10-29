@@ -6,16 +6,17 @@
 # MAGIC OpenAI-compatible client (`rag.generate.set_chat_client`). Everything else (prompt, options that the API supports, scoring) is the
 # MAGIC repo code.
 # MAGIC
-# MAGIC **Before running:** upload `carbon_methodology_databricks.zip` to the Volume folder in the `volume_dir` widget.
-# MAGIC The notebook unzips it to `/tmp/carbon_methodology` (local disk: Volumes do not reliably support the append writes of
-# MAGIC `items.jsonl`), runs there, and copies each finished run folder to `<volume_dir>/results/`.
+# MAGIC **Before running:** the code comes from a Databricks Git folder (this repo, branch `qasper-corpus`, pulled to the latest commit);
+# MAGIC the data (not in git) comes from a Volume folder `data_dir` holding `testset_val.jsonl` and `runs/<the two retrieval runs>/`
+# MAGIC (`items.jsonl`, `config.json`, `summary.json` each). The notebook copies both to `/tmp/carbon_methodology` (local disk: Volumes
+# MAGIC do not reliably support the append writes of `items.jsonl`), runs there, and copies each finished run folder to `<data_dir>/results/`.
 # MAGIC
 # MAGIC **Caveat:** the model is the endpoint's (e.g. Llama 3.1 8B), not the local `llama3.2:3b`, so these answers are not comparable with
 # MAGIC the earlier local runs. Rerank on vs off is still a fair comparison: same model, same saved chunks.
 
 # COMMAND ----------
-dbutils.widgets.text("volume_dir", "/Volumes/workspace/default/documents", "Volume folder with the zip (results go to results/ inside it)")
-dbutils.widgets.text("zip_name", "carbon_methodology_databricks.zip", "zip file name")
+dbutils.widgets.text("git_dir", "/Workspace/Users/xizhurs@gmail.com/learning_agent", "Git folder with the code (repo root)")
+dbutils.widgets.text("data_dir", "/Volumes/workspace/default/documents/carbon_eval", "Volume folder with the data (results go to results/ inside it)")
 dbutils.widgets.text("endpoint", "system.ai.meta-llama-3-1-8b-instruct", "serving endpoint (chat)")
 dbutils.widgets.text("ret_off", "20261028-140242_ret_1024idx_hybrid_rr-off_testset_val", "retrieval run (rerank off)")
 dbutils.widgets.text("ret_on", "20261028-140306_ret_1024idx_hybrid_rr-on_testset_val", "retrieval run (rerank on)")
@@ -23,14 +24,28 @@ dbutils.widgets.text("resume_off", "", "resume: generation run folder name (rera
 dbutils.widgets.text("resume_on", "", "resume: generation run folder name (rerank on), optional")
 
 # COMMAND ----------
-# Unzip to local disk. Existing run folders under /tmp/carbon_methodology are kept, so a partial run can be resumed.
-import os, zipfile
-volume_dir = dbutils.widgets.get("volume_dir")
-zip_path = f"{volume_dir}/{dbutils.widgets.get('zip_name')}"
-assert os.path.isfile(zip_path), f"{zip_path} not found: upload the zip to the Volume folder first"
-with zipfile.ZipFile(zip_path) as z:
-    z.extractall("/tmp")
-print("unzipped to /tmp/carbon_methodology:", sorted(os.listdir("/tmp/carbon_methodology")))
+# Stage the code (Git folder) and the data (Volume) on local disk. Existing generation run folders under /tmp/carbon_methodology
+# are kept, so a partial run can be resumed.
+import os, shutil
+git_dir = dbutils.widgets.get("git_dir")
+data_dir = dbutils.widgets.get("data_dir")
+REPO = "/tmp/carbon_methodology"
+ret_runs = [dbutils.widgets.get("ret_off"), dbutils.widgets.get("ret_on")]
+
+needed = [f"{git_dir}/src/rag/config.py", f"{git_dir}/config.yaml", f"{git_dir}/notebooks/databricks-requirements.txt",
+          f"{data_dir}/testset_val.jsonl"] + [f"{data_dir}/runs/{r}/items.jsonl" for r in ret_runs]
+missing = [p for p in needed if not os.path.isfile(p)]
+assert not missing, ("not found (is the Git folder on branch qasper-corpus and pulled? are the data files uploaded?):\n  "
+                     + "\n  ".join(missing))
+
+shutil.copytree(f"{git_dir}/src", f"{REPO}/src", dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+shutil.copytree(f"{git_dir}/notebooks", f"{REPO}/notebooks", dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+shutil.copy(f"{git_dir}/config.yaml", f"{REPO}/config.yaml")
+os.makedirs(f"{REPO}/data/eval/runs", exist_ok=True)
+shutil.copy(f"{data_dir}/testset_val.jsonl", f"{REPO}/data/eval/testset_val.jsonl")
+for r in ret_runs:
+    shutil.copytree(f"{data_dir}/runs/{r}", f"{REPO}/data/eval/runs/{r}", dirs_exist_ok=True)
+print("staged in", REPO, "->", sorted(os.listdir(REPO)), "| retrieval runs:", ret_runs)
 
 # COMMAND ----------
 # MAGIC %md
@@ -60,7 +75,7 @@ from pathlib import Path
 REPO = "/tmp/carbon_methodology"
 sys.path.insert(0, f"{REPO}/src")
 runs_dir = f"{REPO}/data/eval/runs"
-volume_dir = dbutils.widgets.get("volume_dir")      # variables from before the Python restart are gone
+data_dir = dbutils.widgets.get("data_dir")          # variables from before the Python restart are gone
 endpoint = dbutils.widgets.get("endpoint")
 
 from databricks.sdk import WorkspaceClient
@@ -104,7 +119,7 @@ def run_variant(label: str, rerank: str, ret_widget: str, resume_widget: str) ->
     sys.argv = argv
     run_eval.main()
     new = sorted(d for d in os.listdir(runs_dir) if d.endswith(f"gen_1024idx_hybrid_rr-{label}_testset_val"))[-1]
-    dest = f"{volume_dir}/results/{new}"
+    dest = f"{data_dir}/results/{new}"
     shutil.copytree(f"{runs_dir}/{new}", dest, dirs_exist_ok=True)
     print("copied", new, "->", dest)
 
@@ -114,7 +129,7 @@ run_variant("off", "false", "ret_off", "resume_off")
 run_variant("on", "true", "ret_on", "resume_on")
 
 # COMMAND ----------
-# Result folders (also copied to <volume_dir>/results/). Download items.jsonl, summary.json and config.json of both into local
+# Result folders (also copied to <data_dir>/results/). Download items.jsonl, summary.json and config.json of both into local
 # data/eval/runs/ (same folder names), then export the judge packets locally.
 for d in sorted(os.listdir(runs_dir)):
     if "gen_1024idx" in d:
