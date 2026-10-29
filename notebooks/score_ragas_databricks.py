@@ -13,7 +13,7 @@
 # MAGIC the repo branch `qasper-corpus` must be on GitHub with this notebook. The notebook clones the code, copies the run folders to local
 # MAGIC disk, scores them there, and copies the scored folders to `<data_dir>/results_ragas/`.
 # MAGIC
-# MAGIC **Caveats:** the judge here (Llama 3.3 70B Instruct; an earlier GPT OSS 120B attempt hit the workspace request-rate limit) differs from the Gemini judge of the earlier QASPER runs, and the embeddings differ from
+# MAGIC **Caveats:** the judge here (Qwen3-Next 80B Instruct, which scored the val rerank on/off runs; GPT OSS 120B hit the workspace request-rate limit and a Llama 3.3 70B pass was replaced) differs from the Gemini judge of the earlier QASPER runs, and the embeddings differ from
 # MAGIC local `nomic-embed-text`, so scores are not comparable with those; rerank on vs off is still a fair comparison. A re-run keeps the scores
 # MAGIC already saved and only completes missing ones, so an interrupted or rate-limited run can simply be started again.
 
@@ -22,7 +22,7 @@
 dbutils.widgets.text("data_dir", "/Volumes/workspace/default/documents/carbon_eval", "Volume folder with the data")
 dbutils.widgets.text("gen_off", "20261029-074316_gen_1024idx_hybrid_rr-off_testset_val", "generation run folder (rerank off)")
 dbutils.widgets.text("gen_on", "20261029-074405_gen_1024idx_hybrid_rr-on_testset_val", "generation run folder (rerank on)")
-dbutils.widgets.text("judge_endpoint", "databricks-meta-llama-3-3-70b-instruct", "judge chat endpoint")
+dbutils.widgets.text("judge_endpoint", "databricks-qwen3-next-80b-a3b-instruct", "judge chat endpoint")
 dbutils.widgets.text("embed_endpoint", "databricks-gte-large-en", "embeddings endpoint (confirm the name in the list below)")
 dbutils.widgets.text("workers", "4", "parallel judge calls (8 hit the workspace QPS limit on gpt-oss-120b)")
 dbutils.widgets.text("metrics", "", "optional: comma-separated subset of metrics (empty = all)")
