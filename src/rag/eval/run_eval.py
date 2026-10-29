@@ -219,8 +219,31 @@ def assert_hosted_safe(rows: list[dict], allowed_source: str | None) -> None:
                 raise PrivacyError(f"{r['id']}: retrieved chunk {h['id']!r} is not from {allowed_source!r}; refusing to send")
 
 
+_judge_llm = None
+_judge_embeddings = None
+
+
+def set_judge_models(llm=None, embeddings=None) -> None:
+    """Use these RAGAS-wrapped judge LLM / embeddings (e.g. Databricks serving endpoints) instead of the configured judge and
+    Ollama embeddings; None restores the configured one. Injected, not configured, so run settings stay unchanged."""
+    global _judge_llm, _judge_embeddings
+    _judge_llm, _judge_embeddings = llm, embeddings
+
+
+def build_judge_embeddings(settings: Settings):
+    """Embeddings for RAGAS answer relevancy: the injected ones, or local Ollama (imported only when needed)."""
+    if _judge_embeddings is not None:
+        return _judge_embeddings
+    from langchain_ollama import OllamaEmbeddings
+    from ragas.embeddings import LangchainEmbeddingsWrapper
+
+    return LangchainEmbeddingsWrapper(OllamaEmbeddings(model=settings.embedding.model))
+
+
 def build_judge_llm(settings: Settings):
-    """RAGAS judge LLM: hosted OpenAI-compatible API (key from env) or local Ollama."""
+    """RAGAS judge LLM: the injected one, else a hosted OpenAI-compatible API (key from env) or local Ollama."""
+    if _judge_llm is not None:
+        return _judge_llm
     from ragas.llms import LangchainLLMWrapper
 
     ev = settings.eval
@@ -385,9 +408,7 @@ def ragas_scores(rows: list[dict], settings: Settings, only: set[str] | None = N
     import warnings
 
     warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from langchain_ollama import OllamaEmbeddings
     from ragas import EvaluationDataset, evaluate
-    from ragas.embeddings import LangchainEmbeddingsWrapper
     from ragas.metrics import (AspectCritic, Faithfulness, FactualCorrectness, LLMContextPrecisionWithReference,
                                LLMContextRecall, ResponseRelevancy)
     from ragas.run_config import RunConfig
@@ -399,7 +420,7 @@ def ragas_scores(rows: list[dict], settings: Settings, only: set[str] | None = N
         {"user_input": r["question"], "retrieved_contexts": [h["text"] for h in r["retrieved"]],
          "response": r["answer"], "reference": r["reference_answer"]} for r in ans])
     llm = build_judge_llm(settings)
-    emb = LangchainEmbeddingsWrapper(OllamaEmbeddings(model=settings.embedding.model))
+    emb = build_judge_embeddings(settings)
     metrics = [Faithfulness(), ResponseRelevancy(), LLMContextPrecisionWithReference(), LLMContextRecall(),
                FactualCorrectness(), AspectCritic(**ANSWER_MATCHES_REFERENCE)]
     if only:

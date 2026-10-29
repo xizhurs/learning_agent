@@ -1,0 +1,8 @@
+# RAGAS scoring on the Databricks serverless environment (Python 3.12, aarch64), installed with
+# `pip install -r databricks-requirements-ragas.txt -c databricks-constraints.txt`. Top-level pins only; pip resolves the rest
+# (about 150 packages, notebook-scoped) without changing any version listed in databricks-constraints.txt.
+# Resolved with uv pip compile for that platform: ragas 0.4.3 (as in the local runs), langchain 1.4.7, openai 2.54.0.
+ragas==0.4.3
+langchain-community==0.3.31
+databricks-langchain==0.8.2
+openai==2.54.0
