@@ -98,6 +98,39 @@ A `rerank.min_score` refusal threshold does not work: the near-topic unanswerabl
 0.96 to 0.999, the same range as answerable ones (clearly off-topic queries do score near 0). Refusal is left to the
 generator prompt and is measured with generation runs (`refusal_rate_on_unanswerable`).
 
+## Results (carbon corpus: rerank on vs off)
+Four public documents (VM0047, VCS Standard v5.0, VMD0054, VT0008), Claude-written questions: dev 70 (65 answerable) and val 50
+(45 answerable). Hybrid search, `candidates_k` 30, `top_k` 5. Answers judged 1-5 by Claude in the Claude app (`export-judge`).
+Rerank was kept on by choice (`rerank.enabled: true`); this is what the evidence says about it:
+
+| Split, index, generator | MRR off -> on | evidence_recall@5 off -> on | judge faithfulness | judge correctness |
+|---|---|---|---|---|
+| dev, 512 index*, llama3.2:3b (local) | 0.832 -> 0.835 | 0.962 -> 0.933 | 4.60 -> 4.54 | 4.10 -> 4.01 |
+| val, 512 index*, llama3.2:3b (local) | 0.789 -> 0.837 | 0.889 -> 0.933 | 3.86 -> 4.04 | 3.52 -> 3.50 |
+| val, 1024 index, Llama 3.1 8B (Databricks endpoint) | 0.804 -> 0.819 | 0.885 -> 0.911 | 4.36 -> 4.58 | 4.08 -> 4.08 |
+
+- Rerank on helps retrieval a little on val (MRR +0.015 to +0.05, evidence_recall@3 +0.07 to +0.11) and not on dev
+  (evidence_recall@5 -0.03). Judge faithfulness is +0.18 / +0.22 on the two val runs and -0.06 on dev.
+- **Answer correctness did not improve in any run** (-0.09 to 0.00). On val with Llama 3.1 8B it changed on 10 of 50 questions,
+  5 up and 5 down. The remaining errors look like generator errors (hallucinated numbers, a leading "Yes", wrong table row).
+- Cost: reranking is about 17-26 s/query on this CPU (median per question with the 3B model: 34 s off, 55-59 s on).
+- The reranker reads at most 512 tokens and 10-13% of retrieved chunks are cut, but the gold quote lies beyond the cut in none
+  of the 26 truncated gold chunks, so truncation does not explain the small gain.
+
+Caveats:
+- One judge (Claude, one pass), one run per variant, no repeat runs to estimate run-to-run noise (Ollama determinism at
+  temperature 0 was not tested), and small n: a 0.02-0.05 gap is one or two questions. The judge packet shows each context cut at 1500 characters.
+- \* The dev runs and the first val runs were labelled 1024 but used the 512 index. `RAG__CHUNKING__MAX_TOKENS=1024` changes only
+  the saved settings, not `paths.table_name`, and table `chunks` is text-for-text identical to `chunks_heading_aware_512_64`. Their
+  `config.json` still says 1024. For a real 1024 run set `RAG__PATHS__TABLE_NAME=chunks_heading_aware_1024_128` and
+  `RAG__CHUNKING__OVERLAP=128` (only the `*_1024idx_*` runs did).
+- Rows are not comparable across generators (local llama3.2:3b vs Llama 3.1 8B); compare on vs off within a row only.
+- Not done: the held-out test set, RAGAS on these runs, and any 1024 vs 512 index comparison with generation.
+- Runs: `data/eval/runs/20261027-182323_gen_1024_hybrid_rr-off_testset_dev` / `20261027-203606_gen_1024_hybrid_rr-on_testset_dev`,
+  `20261028-093028_gen_1024_hybrid_rr-off_testset_val` / `20261028-100055_gen_1024_hybrid_rr-on_testset_val`, and
+  `20261029-074316_gen_1024idx_hybrid_rr-off_testset_val` / `20261029-074405_gen_1024idx_hybrid_rr-on_testset_val` (retrieval:
+  `20261028-140242_ret_1024idx_…` / `20261028-140306_ret_1024idx_…`).
+
 ## RAGAS (optional)
 `run_eval run --ragas` scores faithfulness, answer relevancy, context precision/recall and factual correctness with a
 judge LLM set in `config.yaml` (`eval.judge_*`). Default is Google AI Studio (Gemini, via its OpenAI-compatible endpoint):

@@ -28,7 +28,7 @@ retrieval:
   source_filter: null       # e.g. "VM0047-v1.1_Final.pdf" to restrict to one document
 
 rerank:
-  enabled: true             # costs ~15-40 s/query on CPU (see README); not yet compared on the carbon corpus, see rag.eval.ablate
+  enabled: true             # kept on: better val retrieval and judge faithfulness, no gain in answer correctness; ~17-26 s/query on CPU (README, carbon corpus)
   model: BAAI/bge-reranker-base   # cross-encoder, runs on CPU
   min_score: null           # drop chunks scoring below this (sigmoid-scale 0-1); null = keep all
 
