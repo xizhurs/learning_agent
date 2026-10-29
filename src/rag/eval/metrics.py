@@ -1,4 +1,5 @@
 """Deterministic retrieval / refusal metrics (no LLM calls)."""
+
 from __future__ import annotations
 
 import re
@@ -56,7 +57,8 @@ def evidence_recall(quote: str, chunk_texts: list[str], threshold: float) -> flo
 
 def context_precision(quote: str, chunk_texts: list[str], threshold: float) -> float:
     """Rank-weighted precision of the retrieved chunks, as RAGAS context precision but with 'covers an evidence paragraph' as the
-    relevance verdict instead of an LLM's: mean of precision@i over the ranks i holding a relevant chunk; 0 if none is relevant."""
+    relevance verdict instead of an LLM's: mean of precision@i over the ranks i holding a relevant chunk; 0 if none is relevant.
+    """
     hits, total = 0, 0.0
     for i, text in enumerate(chunk_texts, 1):
         if quote_coverage(quote, text) >= threshold:
@@ -107,6 +109,7 @@ def is_refusal(answer: str) -> bool:
 
 def spearman(xs: list[float], ys: list[float]) -> float | None:
     """Spearman rank correlation (average ranks for ties); None if undefined."""
+
     def ranks(v: list[float]) -> list[float]:
         order = sorted(range(len(v)), key=lambda i: v[i])
         out = [0.0] * len(v)
@@ -140,6 +143,10 @@ def latency_summary(timings: list[dict]) -> dict:
         vals.sort()
         n = len(vals)
         median = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
-        out[k] = {"median": round(median, 3), "p95": round(vals[min(n - 1, int(0.95 * n))], 3),
-                  "max": round(vals[-1], 3), "n": n}
+        out[k] = {
+            "median": round(median, 3),
+            "p95": round(vals[min(n - 1, int(0.95 * n))], 3),
+            "max": round(vals[-1], 3),
+            "n": n,
+        }
     return out

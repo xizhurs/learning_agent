@@ -1,9 +1,10 @@
 """End-to-end RAG pipeline used by the CLI, the API and the evaluation harness."""
+
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Iterator
 
 from rag.config import Settings, get_settings
 from rag.generate import NOT_FOUND, build_messages, generate, generate_stream, rewrite_question
@@ -22,7 +23,9 @@ class Answer:
     hits: list[Hit] = field(default_factory=list)
     trace_id: str | None = None
     span_id: str | None = None
-    timings: dict = field(default_factory=dict)     # seconds per step, e.g. {"retrieve": 0.05, "generate": 31.2, "total": 31.3}
+    timings: dict = field(
+        default_factory=dict
+    )  # seconds per step, e.g. {"retrieve": 0.05, "generate": 31.2, "total": 31.3}
 
 
 class Pipeline:
@@ -39,18 +42,28 @@ class Pipeline:
     def _root(self, question: str, history: list[dict] | None, session_id: str | None):
         s = self.settings
         return start_trace(
-            s, "rag.query", input=question, kind="chain", session_id=session_id,
-            **{"rag__generation_model": s.generation.model, "rag__chunk_max_tokens": s.chunking.max_tokens,
-               "retrieval__mode": s.retrieval.mode, "retrieval__top_k": s.retrieval.top_k,
-               "retrieval__source_filter": s.retrieval.source_filter, "rerank__enabled": s.rerank.enabled,
-               "rag__history_turns": len(history or []), "rag__kind": "chat"})
+            s,
+            "rag.query",
+            input=question,
+            kind="chain",
+            session_id=session_id,
+            **{
+                "rag__generation_model": s.generation.model,
+                "rag__chunk_max_tokens": s.chunking.max_tokens,
+                "retrieval__mode": s.retrieval.mode,
+                "retrieval__top_k": s.retrieval.top_k,
+                "retrieval__source_filter": s.retrieval.source_filter,
+                "rerank__enabled": s.rerank.enabled,
+                "rag__history_turns": len(history or []),
+                "rag__kind": "chat",
+            },
+        )
 
     def _prepare(self, question: str, history: list[dict] | None, root):
         gen = self.settings.generation
         standalone = rewrite_question(question, history, gen, root) if (history and gen.rewrite_followups) else question
         hits = retrieve(standalone, self.settings, self.table, root)
-        log.info("q=%r standalone=%r hits=%s", question, standalone,
-                 [(h.id, round(h.score, 3)) for h in hits])
+        log.info("q=%r standalone=%r hits=%s", question, standalone, [(h.id, round(h.score, 3)) for h in hits])
         return standalone, hits
 
     def ask(self, question: str, history: list[dict] | None = None, session_id: str | None = None) -> Answer:

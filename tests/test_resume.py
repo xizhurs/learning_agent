@@ -7,8 +7,16 @@ from rag.eval import run_eval
 
 
 def _item(id_):
-    return {"id": id_, "question": f"Question {id_}?", "type": "factual", "answerable": True, "source": "d1.md",
-            "gold_context_ids": [], "reference_answer": "Alpha", "reference_quote": "Alpha beta gamma."}
+    return {
+        "id": id_,
+        "question": f"Question {id_}?",
+        "type": "factual",
+        "answerable": True,
+        "source": "d1.md",
+        "gold_context_ids": [],
+        "reference_answer": "Alpha",
+        "reference_quote": "Alpha beta gamma.",
+    }
 
 
 def _settings():
@@ -19,7 +27,9 @@ def _settings():
 
 def _fake_generation(monkeypatch, asked):
     monkeypatch.setattr(run_eval, "ensure_table", lambda s: None)
-    monkeypatch.setattr(run_eval, "retrieve", lambda *a, **k: [run_eval.SavedHit("d1.md::00000", 1.0, "Alpha beta gamma.", "d1.md")])
+    monkeypatch.setattr(
+        run_eval, "retrieve", lambda *a, **k: [run_eval.SavedHit("d1.md::00000", 1.0, "Alpha beta gamma.", "d1.md")]
+    )
     monkeypatch.setattr(run_eval, "build_messages", lambda q, hits: q)
 
     def gen(q, cfg, root):
@@ -73,4 +83,7 @@ def test_resume_refuses_when_the_settings_changed(tmp_path):
 def test_append_row_adds_one_json_line(tmp_path):
     run_eval.append_row(tmp_path, {"id": "q1", "answer": "x"})
     run_eval.append_row(tmp_path, {"id": "q2", "answer": "y"})
-    assert [json.loads(l)["id"] for l in (tmp_path / "items.jsonl").read_text(encoding="utf-8").splitlines()] == ["q1", "q2"]
+    assert [json.loads(l)["id"] for l in (tmp_path / "items.jsonl").read_text(encoding="utf-8").splitlines()] == [
+        "q1",
+        "q2",
+    ]

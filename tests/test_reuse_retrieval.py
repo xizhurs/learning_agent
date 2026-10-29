@@ -10,9 +10,13 @@ from rag.generate import build_messages
 def _saved_run(tmp_path):
     run = tmp_path / "old_run"
     run.mkdir()
-    row = {"id": "q1", "retrieved": [
-        {"id": "d1.md::00000", "citation": "d1.md | Intro", "score": 2.5, "text": "Alpha beta gamma."},
-        {"id": "d2.md::00003", "citation": "d2.md | Methods", "score": 1.1, "text": "Delta epsilon."}]}
+    row = {
+        "id": "q1",
+        "retrieved": [
+            {"id": "d1.md::00000", "citation": "d1.md | Intro", "score": 2.5, "text": "Alpha beta gamma."},
+            {"id": "d2.md::00003", "citation": "d2.md | Methods", "score": 1.1, "text": "Delta epsilon."},
+        ],
+    }
     (run / "items.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     return run
 
@@ -26,8 +30,16 @@ def test_saved_chunks_are_read_back_in_order_and_feed_the_prompt(tmp_path):
 
 
 def _item(id_="q1"):
-    return {"id": id_, "question": "What?", "type": "factual", "answerable": True, "source": "d1.md",
-            "gold_context_ids": ["d1.md"], "reference_answer": "Alpha", "reference_quote": "Alpha beta gamma."}
+    return {
+        "id": id_,
+        "question": "What?",
+        "type": "factual",
+        "answerable": True,
+        "source": "d1.md",
+        "gold_context_ids": ["d1.md"],
+        "reference_answer": "Alpha",
+        "reference_quote": "Alpha beta gamma.",
+    }
 
 
 def test_run_items_with_saved_retrieval_never_searches(tmp_path, monkeypatch):

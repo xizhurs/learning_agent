@@ -139,6 +139,72 @@ embeddings (`notebooks/score_ragas_databricks.py`), 45 answerable questions each
   factual_correctness 0.303 vs 0.313). That is a rough sense of how much the numbers move with the judge; the on-off gaps (0.02-0.06) are only a
   few times larger, so read them as a consistent small lean, not a measured effect.
 
+**Larger generator: Llama 3.3 70B on the same retrieval (val, 1024 index, Databricks endpoints).** Same saved chunks as the 8B runs
+(retrieved ids identical for every question; only `generation.model` differs), 50 questions, 45 answerable.
+
+| | 8B off | 8B on | 70B off | 70B on |
+|---|---|---|---|---|
+| Claude judge: faithfulness | 4.36 | 4.58 | 4.78 | 4.76 |
+| Claude judge: correctness | 4.08 | 4.08 | 4.28 | 4.42 |
+| Claude judge: completeness | 3.60 | 3.62 | 3.96 | 4.12 |
+| questions with correctness <= 2 | 11 | 10 | 6 | 6 |
+| false refusal on answerable | 0.044 | 0.089 | 0.089 | 0.067 |
+| refusal on unanswerable | 0.80 | 0.80 | 0.80 | 0.80 |
+| answer_f1 | 0.441 | 0.432 | 0.544 | 0.547 |
+| median generation latency | 0.8 s | 0.6 s | 3.0 s | 5.5 s |
+| RAGAS faithfulness | 0.651 | 0.708 | 0.789 | 0.847 |
+| RAGAS answer_relevancy | 0.478 | 0.511 | 0.572 | 0.638 |
+| RAGAS context precision (with reference) | 0.781 | 0.804 | 0.768 | 0.786 |
+| RAGAS context_recall | 0.893 | 0.922 | 0.893 | 0.922 |
+| RAGAS factual_correctness (f1) | 0.313 | 0.376 | 0.468 | 0.461 |
+| RAGAS answer_matches_reference | 0.778 | 0.800 | 0.733 | 0.844 |
+
+- The 70B model is better than the 8B on both judges: manual correctness +0.20 (rerank off) / +0.34 (on), faithfulness +0.42 / +0.18;
+  RAGAS faithfulness +0.14 in both settings and answer_relevancy +0.09 / +0.13. Correctness-at-most-2 questions drop from 10-11 to 6.
+  False refusals do not go down (4 of 45 off, 3 of 45 on), and the 70B model still cannot make the one-step inference in
+  val_packet_03-06 (direct air capture is technology-based CCS). It also adds wrong answers the 8B did not give (e.g. val_packet_01-07, 01-09).
+- Rerank on vs off with the 70B model: manual correctness +0.14 (5 up, 2 down), manual faithfulness -0.02; RAGAS faithfulness +0.06,
+  answer_relevancy +0.07, answer_matches_reference +0.11, factual_correctness -0.01. A small lean towards rerank on, and the two judges
+  disagree on faithfulness, so the rerank effect on faithfulness is not established.
+- The remaining val failures are mainly retrieval: val_packet_02-07 and 05-07 are refused with rerank on because the evidence is not
+  in the top 5, and a larger generator cannot recover that.
+- **val_packet_04-10 was relabelled.** It was marked unanswerable ("minimum distance between area-based and census-based
+  instances"), but VM0047 section 4 says instances must be "clearly separated by a minimum 10-meter buffer", so it is answerable. The 70B
+  manual judging used the corrected label (val v1.1: "10-meter buffer" scored 5/5); the 8B manual judging used the old one (1/1).
+  `data/eval/testset_val.jsonl` and the saved metrics of all four runs still count it as unanswerable, so `refusal_rate_on_unanswerable`
+  0.8 would be 1.0 (4 of 4) under the new label, and the manual rows are not comparable on that item. Without it (49 questions),
+  8B -> 70B manual correctness is +0.12 (rerank off) and +0.27 (on), faithfulness +0.35 and +0.10.
+- Noise: `llm_context_precision_with_reference` does not depend on the answer, yet it differs between the 8B and the 70B runs by -0.013 and -0.018
+  (rerank off: 2 questions up, 2 down; on: 0 up, 2 down). So the RAGAS judge moves a mean by about 0.015 on identical inputs, in line with the 0.00-0.012 seen when
+  the rerank-off runs were scored again. Gaps of 0.02-0.06 are only 1 to 4 times that.
+- Judges: one Claude judge (separate sessions for the 8B and the 70B packets, not blind to the run) and one RAGAS judge
+  (`databricks-qwen3-next-80b-a3b-instruct`); n = 45-50, one run per variant.
+
+**Retrieval gaps: top 10, other rerankers, RRF fusion** (retrieval only, offline, no generation; dev + val, 110 answerable questions,
+1024 index, hybrid, 30 candidates, `bge-reranker-base`; same evidence rule and `overlap_threshold` as `run_eval`; the check scripts and
+the cached candidates are not in the repo). The rerank-off and rerank-only val numbers match the saved val runs exactly.
+
+| order (110 questions) | evidence_recall@5 | evidence_recall@10 | MRR@5 | MRR@10 |
+|---|---|---|---|---|
+| rerank off (hybrid order) | 0.930 | 0.955 | 0.821 | 0.822 |
+| rerank only | 0.933 | 0.974 | 0.847 | 0.853 |
+| RRF of hybrid and reranker order, k=60 | 0.936 | 0.983 | 0.866 | 0.872 |
+| same, k=10 | 0.942 | 0.979 | 0.867 | 0.872 |
+
+- **Top 10 helps more than anything else tried.** Rerank only goes 0.933 -> 0.974 from top 5 to top 10 (val 0.911 -> 0.956, dev 0.949 -> 0.987);
+  rerank off goes 0.930 -> 0.955. With top 10 most dropped evidence returns (dev 02-13, 03-13, 05-09; val 05-07), and top 15 adds dev 01-13.
+  Not tested: whether the doubled context helps or hurts the answers (it needs a generation run, which has not been done).
+- **Not fixed by any top-k:** val_packet_02-07 (gold chunk `VM0047-v1.1_Final.pdf::00179`, "Step 6: Derive Performance Benchmark", is not among the
+  30 candidates in either order) and one of the three passages of dev_packet_04-13. Those are first-stage misses.
+- **The reranker both rescues and drops evidence.** It finds evidence the hybrid order puts beyond rank 15 (dev 04-07, 04-13) and pushes down evidence
+  hybrid had in the top 5 (val 05-07 rank 3 -> 7, val 03-09 rank 1 -> 8; dev 01-13, 02-13, 03-13, 05-09). Rerank only vs off on recall@5: 6 questions better,
+  6 worse; MRR@5 +0.026 (paired bootstrap 95% interval [-0.038, +0.091]), so on these 110 questions the reranker's retrieval gain is not distinguishable from zero.
+- **RRF fusion of the two orders is not worth adding.** Versus rerank only: recall@5 +0.003 (4 questions up, 3 down), MRR@5 +0.019 (95% interval [-0.016, +0.054]);
+  k=60 and k=10 behave alike. It does not reach the first-stage misses.
+- **`bge-reranker-large`, tried only on the 4 val questions that lacked evidence at top 5** (picked because the base model failed, which favours any
+  alternative): mean evidence recall at top 5 / 10 / 15 / 30 is 0.38 / 0.38 / 0.50 / 0.75 against 0.00 / 0.50 / 0.63 / 0.75 for the base model. It recovers val 05-07 at
+  top 5 but ranks val 01-09 lower, and it took 95-129 s per question against 30-37 s (about 3 times slower). Not tried: `bge-reranker-v2-m3` and any reranker on all questions.
+
 Caveats:
 - One judge (Claude, one pass), one run per variant, no repeat runs to estimate run-to-run noise (Ollama determinism at
   temperature 0 was not tested), and small n: a 0.02-0.05 gap is one or two questions. The judge packet shows each context cut at 1500 characters.
@@ -146,12 +212,14 @@ Caveats:
   the saved settings, not `paths.table_name`, and table `chunks` is text-for-text identical to `chunks_heading_aware_512_64`. Their
   `config.json` still says 1024. For a real 1024 run set `RAG__PATHS__TABLE_NAME=chunks_heading_aware_1024_128` and
   `RAG__CHUNKING__OVERLAP=128` (only the `*_1024idx_*` runs did).
-- Rows are not comparable across generators (local llama3.2:3b vs Llama 3.1 8B); compare on vs off within a row only.
-- Not done: the held-out test set, RAGAS on the dev and the 512-index runs, and any 1024 vs 512 index comparison with generation.
+- Rows are not comparable across generators (local llama3.2:3b vs Llama 3.1 8B vs Llama 3.3 70B); compare on vs off within a row only.
+- Not done: the held-out test set, RAGAS on the dev and the 512-index runs, any 1024 vs 512 index comparison with generation, a generation
+  run with `top_k` 10, and updating `testset_val.jsonl` for the val_packet_04-10 relabel.
 - Runs: `data/eval/runs/20261027-182323_gen_1024_hybrid_rr-off_testset_dev` / `20261027-203606_gen_1024_hybrid_rr-on_testset_dev`,
   `20261028-093028_gen_1024_hybrid_rr-off_testset_val` / `20261028-100055_gen_1024_hybrid_rr-on_testset_val`, and
-  `20261029-074316_gen_1024idx_hybrid_rr-off_testset_val` / `20261029-074405_gen_1024idx_hybrid_rr-on_testset_val` (retrieval:
-  `20261028-140242_ret_1024idx_…` / `20261028-140306_ret_1024idx_…`).
+  `20261029-074316_gen_1024idx_hybrid_rr-off_testset_val` / `20261029-074405_gen_1024idx_hybrid_rr-on_testset_val` (8B; retrieval:
+  `20261028-140242_ret_1024idx_…` / `20261028-140306_ret_1024idx_…`), and
+  `20261029-122512_gen_1024idx_hybrid_rr-off_testset_val` / `20261029-122850_gen_1024idx_hybrid_rr-on_testset_val` (70B, same chunks).
 
 ## RAGAS (optional)
 `run_eval run --ragas` scores faithfulness, answer relevancy, context precision/recall and factual correctness with a

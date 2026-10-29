@@ -53,5 +53,5 @@ def test_accepts_insertions_drops_deletions(tmp_path):
     xml = zipfile.ZipFile(dst).read("word/document.xml").decode()
     assert "w:ins" not in xml and "w:del" not in xml and "delText" not in xml
 
-    assert len(d.tables[0].rows) == 1                      # deleted row removed
+    assert len(d.tables[0].rows) == 1  # deleted row removed
     assert stats.insertions_accepted == 1 and stats.rows_removed == 1

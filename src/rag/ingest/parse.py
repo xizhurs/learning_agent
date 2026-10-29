@@ -1,5 +1,6 @@
 """Parse PDF / DOCX (Docling, cached as JSON so re-chunking doesn't re-parse), plain-text technotes and Markdown papers into
 Docling documents."""
+
 from __future__ import annotations
 
 import re
@@ -20,11 +21,9 @@ SUPPORTED = {".pdf", ".docx", ".txt", ".md"}
 
 def _converter() -> DocumentConverter:
     pdf_opts = PdfPipelineOptions()
-    pdf_opts.do_ocr = False            # both source PDFs are born-digital
+    pdf_opts.do_ocr = False  # both source PDFs are born-digital
     pdf_opts.do_table_structure = True
-    return DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_opts)}
-    )
+    return DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_opts)})
 
 
 def list_documents(settings: Settings) -> list[Path]:

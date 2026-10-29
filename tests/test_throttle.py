@@ -10,10 +10,10 @@ def test_calls_are_spaced_by_min_interval():
         now[0] += s
 
     t = Throttle(2.0, clock=lambda: now[0], sleep=sleep)
-    t.wait()                      # first call: no wait
-    t.wait()                      # second: wait the full interval
-    now[0] += 5                   # idle longer than the interval
-    t.wait()                      # no wait needed
+    t.wait()  # first call: no wait
+    t.wait()  # second: wait the full interval
+    now[0] += 5  # idle longer than the interval
+    t.wait()  # no wait needed
     assert sleeps == [2.0]
 
 

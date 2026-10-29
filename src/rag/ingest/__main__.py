@@ -1,4 +1,5 @@
 """python -m rag.ingest [--reparse]  : parse -> chunk -> embed -> LanceDB, using config.yaml."""
+
 from __future__ import annotations
 
 import argparse
@@ -23,8 +24,10 @@ def main() -> None:
         cs = chunk_document(doc, settings.chunking)
         kinds = Counter(c.kind for c in cs)
         toks = [count_tokens(c.text) for c in cs]
-        print(f"  {len(cs)} chunks {dict(kinds)}, tokens min/avg/max = "
-              f"{min(toks)}/{sum(toks) // len(toks)}/{max(toks)}")
+        print(
+            f"  {len(cs)} chunks {dict(kinds)}, tokens min/avg/max = "
+            f"{min(toks)}/{sum(toks) // len(toks)}/{max(toks)}"
+        )
         chunks.extend(cs)
 
     print(f"embedding {len(chunks)} chunks with {settings.embedding.model} ...")

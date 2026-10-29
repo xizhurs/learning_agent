@@ -10,6 +10,7 @@ streams answers across executor threads.
     step.end(output=...)
     root.end(output=answer)          # root.timings -> {"retrieve": 0.04, ..., "total": 41.2}
 """
+
 from __future__ import annotations
 
 import json
@@ -23,7 +24,7 @@ log = logging.getLogger("rag.tracing")
 
 _tracer = None
 _provider = None
-_state = "uninit"          # uninit | on | off
+_state = "uninit"  # uninit | on | off
 
 
 def _install(tracer, provider=None) -> None:
@@ -49,13 +50,21 @@ def _init(settings) -> None:
         u = urlparse(cfg.endpoint)
         socket.create_connection((u.hostname, u.port or 80), timeout=0.5).close()
     except OSError:
-        log.info("Phoenix not reachable at %s; tracing is off for this process (start it with `phoenix serve`)", cfg.endpoint)
+        log.info(
+            "Phoenix not reachable at %s; tracing is off for this process (start it with `phoenix serve`)", cfg.endpoint
+        )
         return
     try:
         from phoenix.otel import register
 
-        _provider = register(endpoint=cfg.endpoint, project_name=cfg.project_name, protocol="http/protobuf",
-                             batch=True, set_global_tracer_provider=False, verbose=False)
+        _provider = register(
+            endpoint=cfg.endpoint,
+            project_name=cfg.project_name,
+            protocol="http/protobuf",
+            batch=True,
+            set_global_tracer_provider=False,
+            verbose=False,
+        )
         _tracer = _provider.get_tracer("rag")
         _state = "on"
     except Exception as e:  # noqa: BLE001
@@ -71,8 +80,15 @@ def _jsonable(v: Any) -> Any:
 
 
 class Span:
-    def __init__(self, name: str, kind: str, parent: "Span | None" = None, input: Any = None,
-                 session_id: str | None = None, attrs: dict | None = None):
+    def __init__(
+        self,
+        name: str,
+        kind: str,
+        parent: Span | None = None,
+        input: Any = None,
+        session_id: str | None = None,
+        attrs: dict | None = None,
+    ):
         self.name = name
         self.t0 = time.perf_counter()
         self.seconds: float | None = None
@@ -107,7 +123,7 @@ class Span:
         return format(self._span.get_span_context().span_id, "016x") if self._span is not None else None
 
     # ---- building the tree ---------------------------------------------------------------------
-    def child(self, name: str, kind: str = "chain", input: Any = None, **attrs) -> "Span":
+    def child(self, name: str, kind: str = "chain", input: Any = None, **attrs) -> Span:
         return Span(name, kind, parent=self, input=input, attrs=attrs)
 
     def set(self, **attrs) -> None:
@@ -127,7 +143,9 @@ class Span:
             attrs[f"{p}.id"] = h.id
             attrs[f"{p}.content"] = h.text
             attrs[f"{p}.score"] = float(h.score)
-            attrs[f"{p}.metadata"] = json.dumps({"source": h.source, "page": h.page, "section": h.section, "kind": h.kind})
+            attrs[f"{p}.metadata"] = json.dumps(
+                {"source": h.source, "page": h.page, "section": h.section, "kind": h.kind}
+            )
         self.set(**{k.replace(".", "__"): v for k, v in attrs.items()})
 
     def set_llm(self, model: str, messages: list[dict], output: str | None = None, params: dict | None = None) -> None:
@@ -177,15 +195,18 @@ class Span:
         return self.seconds
 
 
-def start_trace(settings, name: str, input: Any = None, kind: str = "chain", session_id: str | None = None,
-                **attrs) -> Span:
+def start_trace(
+    settings, name: str, input: Any = None, kind: str = "chain", session_id: str | None = None, **attrs
+) -> Span:
     _init(settings)
     return Span(name, kind, input=input, session_id=session_id, attrs=attrs)
 
 
-def child_of(parent: "Span | None", name: str, kind: str = "chain", input: Any = None, **attrs) -> Span:
+def child_of(parent: Span | None, name: str, kind: str = "chain", input: Any = None, **attrs) -> Span:
     """A child span, or a standalone one (timing only) when no parent trace is active."""
-    return parent.child(name, kind, input, **attrs) if parent is not None else Span(name, kind, input=input, attrs=attrs)
+    return (
+        parent.child(name, kind, input, **attrs) if parent is not None else Span(name, kind, input=input, attrs=attrs)
+    )
 
 
 def flush(timeout_ms: int = 10_000) -> None:
@@ -209,8 +230,15 @@ def annotate(settings, annotations: list[dict]) -> int:
         data = []
         for a in annotations:
             result = {k: a[k] for k in ("score", "label", "explanation") if a.get(k) is not None}
-            data.append({"name": a["name"], "span_id": a["span_id"], "annotator_kind": a.get("kind", "CODE"),
-                         "result": result, "identifier": f"{a['span_id']}:{a['name']}"})
+            data.append(
+                {
+                    "name": a["name"],
+                    "span_id": a["span_id"],
+                    "annotator_kind": a.get("kind", "CODE"),
+                    "result": result,
+                    "identifier": f"{a['span_id']}:{a['name']}",
+                }
+            )
         client.spans.log_span_annotations(span_annotations=data, sync=True)
         return len(data)
     except Exception as e:  # noqa: BLE001

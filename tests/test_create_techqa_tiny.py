@@ -30,11 +30,25 @@ def source(tmp_path):
         (corpus / f"swg{i:05d}.txt").write_text(doc(i), encoding="utf-8")
     rows = []
     for i in [i for i in range(400) if i % len(PRODUCTS) < 2]:
-        rows.append({"id": f"Q{i}", "question": f"How do I fix error E{i:04d} in {PRODUCTS[i % len(PRODUCTS)]}?", "answer": f"restart {i}",
-                     "is_impossible": False, "contexts": [{"filename": f"swg{i:05d}.txt", "text": doc(i)}]})
+        rows.append(
+            {
+                "id": f"Q{i}",
+                "question": f"How do I fix error E{i:04d} in {PRODUCTS[i % len(PRODUCTS)]}?",
+                "answer": f"restart {i}",
+                "is_impossible": False,
+                "contexts": [{"filename": f"swg{i:05d}.txt", "text": doc(i)}],
+            }
+        )
     for i in range(30):
-        rows.append({"id": f"I{i}", "question": f"Unanswerable question number {i} about nothing", "answer": "-", "is_impossible": True,
-                     "contexts": []})
+        rows.append(
+            {
+                "id": f"I{i}",
+                "question": f"Unanswerable question number {i} about nothing",
+                "answer": "-",
+                "is_impossible": True,
+                "contexts": [],
+            }
+        )
     train = tmp_path / "train.json"
     train.write_text(json.dumps(rows), encoding="utf-8")
     return train, corpus
@@ -63,9 +77,15 @@ def test_hard_negatives_come_from_the_questions_product_families_and_are_never_g
     gold = {c["context_id"] for c in result["contexts"] if c["role"] == "gold"}
     hard = [c for c in result["contexts"] if c["role"] == "hard_negative"]
     assert len(hard) == 40 and not gold & {c["context_id"] for c in hard}
-    assert len(result["contexts"]) == 80 + 100                 # hard negatives are part of the distractor budget
-    assert {product_of(c["context_id"]) for c in hard} == {"websphere", "datacap"}      # every question is about one of these two
-    assert {product_of(c["context_id"]) for c in result["contexts"] if c["role"] == "distractor"} - {"websphere", "datacap"}
+    assert len(result["contexts"]) == 80 + 100  # hard negatives are part of the distractor budget
+    assert {product_of(c["context_id"]) for c in hard} == {
+        "websphere",
+        "datacap",
+    }  # every question is about one of these two
+    assert {product_of(c["context_id"]) for c in result["contexts"] if c["role"] == "distractor"} - {
+        "websphere",
+        "datacap",
+    }
     again = tiny.build(train, corpus, seed=1, n_distractors=100, n_hard=40)
     assert [c["context_id"] for c in again["contexts"]] == [c["context_id"] for c in result["contexts"]]
 
@@ -75,7 +95,9 @@ def test_hard_negatives_are_spread_over_gold_documents(source):
     queries = {"swg00000.txt": "websphere error E0000", "swg00001.txt": "datacap error E0001"}
     out = tiny.pick_hard_negatives(corpus, queries, set(), {"swg00000.txt", "swg00001.txt"}, 6)
     products = [product_of(n) for n, _ in out]
-    assert products.count("websphere") == 3 and products.count("datacap") == 3          # round-robin, not 6 from one gold document
+    assert (
+        products.count("websphere") == 3 and products.count("datacap") == 3
+    )  # round-robin, not 6 from one gold document
 
 
 def test_too_many_hard_negatives_exit_with_a_message(source):

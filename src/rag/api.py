@@ -2,6 +2,7 @@
 
 Run:  uv run uvicorn rag.api:app --reload      then open http://localhost:8000
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,7 +17,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from rag.config import PROJECT_ROOT, load_settings
-from rag.ingest.build import ensure_table
 from rag.pipeline import Pipeline
 
 logging.basicConfig(level=logging.INFO)
@@ -40,12 +40,14 @@ class ChatRequest(BaseModel):
     rerank: bool | None = None
     top_k: int | None = Field(default=None, ge=1, le=12)
     source: str | None = None
-    session_id: str | None = Field(default=None, max_length=100)   # conversation id, groups traces in Phoenix
+    session_id: str | None = Field(default=None, max_length=100)  # conversation id, groups traces in Phoenix
 
 
 def _known_sources() -> list[str]:
     docs = PROJECT_ROOT / _default_settings.paths.documents_dir
-    return sorted(p.name for p in docs.glob("*") if p.suffix.lower() in {".pdf", ".docx"} and not p.name.startswith("~$"))
+    return sorted(
+        p.name for p in docs.glob("*") if p.suffix.lower() in {".pdf", ".docx"} and not p.name.startswith("~$")
+    )
 
 
 def _pipeline_for(req: ChatRequest) -> Pipeline:
@@ -73,8 +75,12 @@ def _sse(event: str, data) -> str:
 @app.get("/api/config")
 def config():
     s = _default_settings
-    return {"retrieval": s.retrieval.model_dump(), "rerank": {"enabled": s.rerank.enabled},
-            "model": s.generation.model, "sources": _known_sources()}
+    return {
+        "retrieval": s.retrieval.model_dump(),
+        "rerank": {"enabled": s.rerank.enabled},
+        "model": s.generation.model,
+        "sources": _known_sources(),
+    }
 
 
 @app.post("/chat")
@@ -91,16 +97,23 @@ async def chat(req: ChatRequest):
         t0 = time.perf_counter()
         try:
             hits, tokens, root = await loop.run_in_executor(None, pipe.stream, req.question, history, req.session_id)
-            yield _sse("sources", [
-                {"n": i, "citation": h.citation(), "score": round(h.score, 3), "kind": h.kind, "text": h.text}
-                for i, h in enumerate(hits, 1)])
+            yield _sse(
+                "sources",
+                [
+                    {"n": i, "citation": h.citation(), "score": round(h.score, 3), "kind": h.kind, "text": h.text}
+                    for i, h in enumerate(hits, 1)
+                ],
+            )
             it = iter(tokens)
             while True:
                 tok = await loop.run_in_executor(None, next, it, None)
                 if tok is None:
                     break
                 yield _sse("token", tok)
-            yield _sse("done", {"trace_id": root.trace_id, "seconds": round(time.perf_counter() - t0, 1), "timings": root.timings})
+            yield _sse(
+                "done",
+                {"trace_id": root.trace_id, "seconds": round(time.perf_counter() - t0, 1), "timings": root.timings},
+            )
         except Exception as e:  # noqa: BLE001
             yield _sse("error", str(e))
 

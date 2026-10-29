@@ -11,6 +11,7 @@ Without --set this is the dev set (used for tuning / ablations). A named set (e.
 data/eval/<set>/{packets,replies}/ -> data/eval/testset_<set>.jsonl, and its export skips every passage already
 used by another set, so the holdout questions come from unseen passages.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -98,7 +99,7 @@ def _candidate_passages(settings) -> list[dict]:
         doc = parse_document(path, settings)
         for c in chunk_document(doc, CHUNKING_FOR_PASSAGES):
             body = c.text
-            if count_tokens(body) < 60 or len(_norm(body)) < 60:   # second test drops separator-only tables
+            if count_tokens(body) < 60 or len(_norm(body)) < 60:  # second test drops separator-only tables
                 continue
             if body.count("....") >= 3 or "contents" in c.section.lower():
                 continue
@@ -129,7 +130,9 @@ def export(packets: int, per_packet: int, seed: int, set_name: str = "") -> None
         texts = [p for p in ps if p["kind"] != "table"]
         n_tab = min(len(tables), max(1, per_source // 4))
         chosen += rng.sample(tables, n_tab) + rng.sample(texts, min(len(texts), per_source - n_tab))
-    if len(chosen) < need:   # a small source ran out of its share (e.g. text passages used by earlier sets): top up from the rest
+    if (
+        len(chosen) < need
+    ):  # a small source ran out of its share (e.g. text passages used by earlier sets): top up from the rest
         rest = [p for p in pool if p not in chosen]
         chosen += rng.sample(rest, min(len(rest), need - len(chosen)))
     rng.shuffle(chosen)
@@ -149,13 +152,16 @@ def export(packets: int, per_packet: int, seed: int, set_name: str = "") -> None
             md += f"\n[{pid}] source: {g['source']}{page} | section: {g['section'] or 'n/a'} | type: {g['kind']}\n{g['text']}\n"
         (out_dir / f"packet_{i + 1:02d}.md").write_text(md, encoding="utf-8")
         (out_dir / f"packet_{i + 1:02d}.passages.json").write_text(
-            json.dumps(passages, ensure_ascii=False, indent=1), encoding="utf-8")
+            json.dumps(passages, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
     replies = _set_dir(set_name) / "replies"
     replies.mkdir(parents=True, exist_ok=True)
     set_arg = f" --set {set_name}" if set_name else ""
     print(f"wrote {min(packets, -(-len(chosen) // per_packet))} packets to {out_dir}")
-    print("Next: paste each packet_NN.md into the Claude app, save the JSON-only reply as "
-          f"{replies / 'packet_NN.json'}, then run: python -m rag.eval.gen_testset import{set_arg}")
+    print(
+        "Next: paste each packet_NN.md into the Claude app, save the JSON-only reply as "
+        f"{replies / 'packet_NN.json'}, then run: python -m rag.eval.gen_testset import{set_arg}"
+    )
 
 
 def _load_reply(path: Path) -> list[dict]:
@@ -227,14 +233,24 @@ def import_replies(set_name: str = "") -> None:
                     continue
             first = passages[pids[0]] if pids and pids[0] in passages else {}
             prefix = f"{set_name}_" if set_name else ""
-            items.append({
-                "id": f"{prefix}{stem}-{k + 1:02d}", "question": q, "reference_answer": ans if answerable else "",
-                "reference_contexts": texts, "reference_quote": quote if answerable else "",
-                "type": qtype, "answerable": answerable,
-                "source": first.get("source", ""), "page": first.get("page", 0), "section": first.get("section", ""),
-            })
+            items.append(
+                {
+                    "id": f"{prefix}{stem}-{k + 1:02d}",
+                    "question": q,
+                    "reference_answer": ans if answerable else "",
+                    "reference_contexts": texts,
+                    "reference_quote": quote if answerable else "",
+                    "type": qtype,
+                    "answerable": answerable,
+                    "source": first.get("source", ""),
+                    "page": first.get("page", 0),
+                    "section": first.get("section", ""),
+                }
+            )
     out = _testset_path(set_name)
-    out.write_text("\n".join(json.dumps(i, ensure_ascii=False) for i in items) + ("\n" if items else ""), encoding="utf-8")
+    out.write_text(
+        "\n".join(json.dumps(i, ensure_ascii=False) for i in items) + ("\n" if items else ""), encoding="utf-8"
+    )
     (sd / "import_report.txt").write_text("\n".join(rejected) or "no rejections", encoding="utf-8")
     n_un = sum(not i["answerable"] for i in items)
     print(f"{len(items)} questions imported ({n_un} unanswerable), {len(rejected)} rejected -> {out}")
@@ -252,8 +268,12 @@ def main() -> None:
     e.add_argument("--seed", type=int, default=0)
     i = sub.add_parser("import")
     for p in (e, i):
-        p.add_argument("--set", dest="set_name", default="",
-                       help="named set, e.g. holdout (default: the dev set data/eval/testset.jsonl)")
+        p.add_argument(
+            "--set",
+            dest="set_name",
+            default="",
+            help="named set, e.g. holdout (default: the dev set data/eval/testset.jsonl)",
+        )
     args = ap.parse_args()
     if args.cmd == "export":
         export(args.packets, args.per_packet, args.seed, args.set_name)

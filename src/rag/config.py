@@ -1,4 +1,5 @@
 """Typed configuration loaded from config.yaml, overridable via RAG__SECTION__KEY env vars."""
+
 from __future__ import annotations
 
 import os
@@ -73,8 +74,10 @@ class Eval(BaseModel):
     # null = the corpus is public (e.g. QASPER, CC BY 4.0), so nothing is restricted.
     judge_allowed_source: str | None = None
     judge_max_workers: int = 2
-    judge_reasoning_effort: str | None = "low"   # e.g. low / none: cuts latency of thinking models (Gemini); null = not sent
-    judge_min_interval_s: float = 0.0   # minimum seconds between hosted-judge requests (0 = no throttle)
+    judge_reasoning_effort: str | None = (
+        "low"  # e.g. low / none: cuts latency of thinking models (Gemini); null = not sent
+    )
+    judge_min_interval_s: float = 0.0  # minimum seconds between hosted-judge requests (0 = no throttle)
     hit_ks: list[int] = [1, 3, 5]
     overlap_threshold: float = 0.6
 
@@ -103,7 +106,7 @@ def _apply_env_overrides(raw: dict) -> dict:
     for key, value in os.environ.items():
         if not key.startswith("RAG__"):
             continue
-        parts = key[len("RAG__"):].lower().split("__")
+        parts = key[len("RAG__") :].lower().split("__")
         node = raw
         for p in parts[:-1]:
             node = node.setdefault(p, {})

@@ -1,4 +1,5 @@
 """Build / reuse LanceDB tables for a given settings object (used by ingest CLI and ablations)."""
+
 from __future__ import annotations
 
 from rag.config import Settings
