@@ -107,7 +107,14 @@ for mode, rr in rows:
 # DBTITLE 1,Chat
 # Type in the box and press Send; the options and the sampling sliders apply to the next answer. Clear starts a new conversation.
 import ipywidgets as w
+from IPython import get_ipython
 from IPython.display import display
+
+# A Send click runs with the widget's comm message as parent_header, which has no command context, so
+# the Databricks SDK cannot fetch the api_token and every endpoint call fails with a misleading
+# APIConnectionError. Snapshot this cell's parent_header (a real command, it has the token) and swap
+# it back in while answering; see dbruntime/sdk_credential_provider.py.
+_PARENT_HEADER = get_ipython().parent_header
 
 style = {"description_width": "90px"}
 mode_w = w.Dropdown(options=["fts", "vector", "hybrid"], value=CONFIG["retrieval_mode"], description="retrieval", style=style)
@@ -127,13 +134,19 @@ def on_send(_):
     box.value, send.disabled, status.value = "", True, "working..."
     with log:
         print(f"YOU: {q}")
+        _ip = get_ipython()
+        _ph = _ip.parent_header
+        _ip.parent_header = _PARENT_HEADER  # a widget click has no command context for the token
         try:
             a = bot.ask(
                 q, history, retrieval_mode=mode_w.value, rerank=rerank_w.value, temperature=temp_w.value,
                 top_p=top_p_w.value if top_p_w.value != 1.0 else None, sampling_top_k=top_k_w.value or None,
             )
         except Exception as e:
-            print(f"ERROR {type(e).__name__}: {e}\n")
+            import traceback
+            globals()["LAST_ERROR"] = traceback.format_exc()
+            print(f"ERROR {type(e).__name__}: {e}")
+            print(LAST_ERROR + "\n")
         else:
             history.extend([{"role": "user", "content": q}, {"role": "assistant", "content": a.answer}])
             if a.standalone_question != q:
@@ -145,6 +158,8 @@ def on_send(_):
                 print("WARNING:", msg)
             print(f"[{a.retrieval_mode} | rerank {a.rerank} | T {temp_w.value} p {top_p_w.value} k {top_k_w.value or '-'} | "
                   + " ".join(f"{k} {v:.1f}s" for k, v in a.timings.items()) + f" | turn {len(history) // 2}]\n")
+        finally:
+            _ip.parent_header = _ph
     send.disabled, status.value = False, ""
 
 
