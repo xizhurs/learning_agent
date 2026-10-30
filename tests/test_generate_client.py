@@ -42,6 +42,15 @@ def test_generate_handles_an_empty_reply():
     assert gen.generate([{"role": "user", "content": "q"}], Generation()) == ""
 
 
+def test_rewrite_question_uses_the_injected_client():
+    client = FakeClient(content=' "What area does a plot cover?" ')
+    gen.set_chat_client(client)
+    history = [{"role": "user", "content": "Tell me about plots"}]
+    out = gen.rewrite_question("And its area?", history, Generation(model="endpoint-x"))
+    assert out == "What area does a plot cover?"
+    assert client.calls[0]["model"] == "endpoint-x" and client.calls[0]["temperature"] == 0.0
+
+
 def test_without_a_client_generate_still_calls_ollama(monkeypatch):
     seen = {}
 

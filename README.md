@@ -221,6 +221,23 @@ Caveats:
   `20261028-140242_ret_1024idx_…` / `20261028-140306_ret_1024idx_…`), and
   `20261029-122512_gen_1024idx_hybrid_rr-off_testset_val` / `20261029-122850_gen_1024idx_hybrid_rr-on_testset_val` (70B, same chunks).
 
+## Databricks notebooks (`notebooks/`)
+Each notebook clones the `qasper-corpus` branch from GitHub, so push before running. Local logic stays in `src/rag/` and is tested without Databricks.
+
+| notebook | does |
+|---|---|
+| `db_01b_load_chunks_parquet.py` / `db_02_ai_search_index.py` | chunks Delta table -> AI Search index (the managed embeddings) |
+| `db_03_retrieval_eval.py` | retrieval-only runs; variants `off` (hybrid), `on` (AI Search reranker), `llm` (chat-LLM reranker) |
+| `generate_val_databricks.py`, `score_ragas_databricks.py` | answers from saved chunks, then RAGAS (the optional third `llm` run via `ret_llm` / `gen_llm`) |
+| `db_run_all.py` | runs db_02 -> db_03 -> generation -> RAGAS in one go and writes a record to `<data_dir>/pipeline_runs/` |
+| `db_04_chatbot.py` | multi-turn chatbot with a retrieval-mode (`fts`/`vector`/`hybrid`) and rerank (`off`/`ai_search`/`llm`) choice; optionally logs an MLflow `ResponsesAgent` |
+
+`rag.llm_rerank.LLMReranker` is a listwise reranker: one chat call per query ranks the top `candidates_k` hits (each cut to 1,500
+characters) and returns passage numbers as JSON. An unusable reply raises `RerankerUnavailable` (a run is never labelled "reranked"
+when it was not); the chatbot instead falls back to no rerank and shows a warning. `rag.chat.Chatbot` and `rag.serving_agent` hold the
+chatbot logic. **Not yet evaluated:** whether the LLM reranker beats `off` or the AI Search reranker (run `db_run_all.py` with
+`variants = off:5,on:5,llm:5`), and the `FULL_TEXT` / `ANN` query types on this index (`db_04_chatbot.py` checks them at start-up).
+
 ## RAGAS (optional)
 `run_eval run --ragas` scores faithfulness, answer relevancy, context precision/recall and factual correctness with a
 judge LLM set in `config.yaml` (`eval.judge_*`). Default is Google AI Studio (Gemini, via its OpenAI-compatible endpoint):

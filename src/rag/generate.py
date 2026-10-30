@@ -128,10 +128,16 @@ def rewrite_question(question: str, history: list[dict], cfg: Generation, span: 
     convo = "\n".join(f"{m['role']}: {m['content']}" for m in history[-6:])
     messages = [{"role": "user", "content": REWRITE_PROMPT.format(history=convo, question=question)}]
     step = child_of(span, "rewrite", "llm", input=question)
-    resp = _ollama().chat(model=cfg.model, messages=messages, options={"temperature": 0.0, "num_ctx": 4096})
-    text = resp["message"]["content"].strip().strip('"') or question
+    if _chat_client is not None:
+        resp = _chat_client.chat.completions.create(model=cfg.model, messages=messages, temperature=0.0, max_tokens=200)
+        text = (resp.choices[0].message.content or "").strip().strip('"') or question
+        stats = _openai_stats(resp)
+    else:
+        resp = _ollama().chat(model=cfg.model, messages=messages, options={"temperature": 0.0, "num_ctx": 4096})
+        text = resp["message"]["content"].strip().strip('"') or question
+        stats = _ollama_stats(resp)
     step.set_llm(cfg.model, messages, text)
-    step.end(output=text, **_ollama_stats(resp))
+    step.end(output=text, **stats)
     return text
 
 

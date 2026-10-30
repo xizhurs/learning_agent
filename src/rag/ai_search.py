@@ -8,6 +8,7 @@ databricks.*: the caller passes the index object (`AISearchClient().get_index(..
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 
 from rag.config import Settings
@@ -48,10 +49,18 @@ class AISearchRetriever:
         True  # require `reranker_time` in debug_info so a silent fallback cannot pass as a reranked run
     )
     stats: dict = field(default_factory=lambda: {"calls": 0, "reranker_seconds": 0.0, "response_seconds": 0.0})
+    query_type: str = "hybrid"  # AI Search query types: ANN (vector), FULL_TEXT, HYBRID
+    llm_reranker: object = (
+        None  # rag.llm_rerank.LLMReranker: rerank `candidates_k` hits with a chat LLM instead of `reranker`
+    )
+    candidates_k: int | None = None  # None: settings.retrieval.candidates_k (only used with llm_reranker)
 
     def __call__(self, query: str, settings: Settings, table=None, span=None) -> list[SearchHit]:
         k = self.num_results or settings.retrieval.top_k
-        kwargs = {"query_text": query, "columns": COLUMNS, "num_results": k, "query_type": "hybrid"}
+        n = (self.candidates_k or settings.retrieval.candidates_k) if self.llm_reranker is not None else k
+        if n < k:  # fewer candidates than results wanted would silently change what a "top-k" run measures
+            raise ValueError(f"candidates_k ({n}) must be at least num_results ({k})")
+        kwargs = {"query_text": query, "columns": COLUMNS, "num_results": n, "query_type": self.query_type}
         if self.rerank:
             kwargs.update(reranker=self.reranker, debug_level=1)
         resp = self.index.similarity_search(**kwargs)
@@ -64,7 +73,12 @@ class AISearchRetriever:
                 raise RerankerUnavailable(f"no reranker_time in debug_info for query {query[:80]!r}: {debug}")
             self.stats["reranker_seconds"] += float(debug.get("reranker_time") or 0.0)
         self.stats["response_seconds"] += float(debug.get("response_time") or 0.0)
-        return _hits(resp, k)
+        hits = _hits(resp, n)
+        if self.llm_reranker is not None:
+            t0 = time.perf_counter()
+            hits = self.llm_reranker.rerank(query, hits)
+            self.stats["reranker_seconds"] += time.perf_counter() - t0
+        return hits[:k]
 
 
 def _hits(resp: dict, k: int) -> list[SearchHit]:
@@ -89,8 +103,33 @@ def _hits(resp: dict, k: int) -> list[SearchHit]:
     return hits
 
 
-def make_retriever(index, *, rerank: bool, reranker=None, num_results: int | None = None, verify_rerank: bool = True):
-    """A retrieve function for run_eval.set_retriever: hybrid search, reranked when `rerank` (then `reranker` is required)."""
+def make_retriever(
+    index,
+    *,
+    rerank: bool,
+    reranker=None,
+    num_results: int | None = None,
+    verify_rerank: bool = True,
+    query_type: str = "hybrid",
+    llm_reranker=None,
+    candidates_k: int | None = None,
+):
+    """A retrieve function for run_eval.set_retriever: hybrid search (or `query_type`), reranked when `rerank` (then
+    `reranker` is required) or, instead, by `llm_reranker` over `candidates_k` hits. The two rerankers exclude each other.
+    """
     if rerank and reranker is None:
         raise ValueError("rerank=True needs a reranker, e.g. DatabricksReranker(columns_to_rerank=['text'])")
-    return AISearchRetriever(index, rerank, reranker, num_results, verify_rerank)
+    if rerank and llm_reranker is not None:
+        raise ValueError("use either the AI Search reranker (rerank=True) or llm_reranker, not both")
+    if llm_reranker is not None and num_results and candidates_k and candidates_k < num_results:
+        raise ValueError(f"candidates_k ({candidates_k}) must be at least num_results ({num_results})")
+    return AISearchRetriever(
+        index,
+        rerank,
+        reranker,
+        num_results,
+        verify_rerank,
+        query_type=query_type,
+        llm_reranker=llm_reranker,
+        candidates_k=candidates_k,
+    )
