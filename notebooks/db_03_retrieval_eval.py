@@ -18,14 +18,14 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("git_ref", "qasper-corpus", "branch or commit of the code to run (db_run_all.py pins one commit)")
+dbutils.widgets.text("git_ref", "qasper-corpus", "branch or commit of the code to run (set a commit to reproduce a run exactly)")
 dbutils.widgets.text("data_dir", "/Volumes/workspace/default/documents/carbon_eval", "Volume folder with the test sets (results go to results_retrieval/)")
 dbutils.widgets.text("index_name", "workspace.carbon_rag.chunks_1024_idx", "AI Search index name")
 dbutils.widgets.text("endpoint", "carbon", "AI Search endpoint")
 dbutils.widgets.text("embed_endpoint", "databricks-gte-large-en", "embeddings endpoint of the index (recorded only)")
 dbutils.widgets.dropdown("testset", "testset_val", ["testset_val", "testset_dev"], "question set")
-dbutils.widgets.text("variants", "off:5,on:5,off:7,on:7", "variants, e.g. off:5,on:5,llm:5")
-dbutils.widgets.text("rerank_endpoint", "databricks-meta-llama-3-3-70b-instruct", "chat endpoint for the llm variant (non-reasoning model)")
+dbutils.widgets.text("variants", "off:5,llm:5", "variants, e.g. off:5,llm:5 (on = AI Search reranker, not available on Free Edition)")
+dbutils.widgets.text("rerank_endpoint", "databricks-meta-llama-3-1-8b-instruct", "small chat endpoint for the llm variant (non-reasoning model)")
 dbutils.widgets.text("candidates_k", "20", "hits the llm variant reranks")
 dbutils.widgets.text("reranker_columns", "text", "columns_to_rerank (comma separated; only the first 2000 characters are read)")
 dbutils.widgets.text("tag_prefix", "ret_aisearch_gte_hybrid", "run folder tag prefix")

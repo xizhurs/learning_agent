@@ -16,7 +16,7 @@
 # MAGIC
 # MAGIC **Guards:** every `source` must be one of the four public files in `allowed_sources` (the draft project description must never be loaded); ids unique; text under the
 # MAGIC index limit. Re-running replaces the table (`overwrite`); if an AI Search index already exists on it, run `db_02_ai_search_index.py` with `recreate = yes` afterwards.
-# MAGIC The last cell returns a JSON status (used by `db_run_all.py`).
+# MAGIC The last cell returns a JSON status.
 
 # COMMAND ----------
 

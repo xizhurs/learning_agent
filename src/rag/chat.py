@@ -79,10 +79,16 @@ class Chatbot:
         *,
         retrieval_mode: str | None = None,
         rerank: str | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        sampling_top_k: int | None = None,
     ) -> ChatAnswer:
-        """Answer one question. `history`: earlier turns as [{"role": "user"|"assistant", "content": ...}]."""
+        """Answer one question. `history`: earlier turns as [{"role": "user"|"assistant", "content": ...}].
+        temperature / top_p / sampling_top_k override settings.generation for this answer only (None = keep the setting).
+        """
         mode, rr = retrieval_mode or self.retrieval_mode, rerank or self.rerank
         _check(mode, rr)
+        _check_sampling(temperature, top_p, sampling_top_k)
         question = question.strip()
         if not question:
             raise ValueError("empty question")
@@ -91,7 +97,8 @@ class Chatbot:
         )  # configuration errors (e.g. no reranker given) raise here, not in the fallback
         t0 = time.perf_counter()
         timings: dict = {}
-        gen = self.settings.generation
+        given = {"temperature": temperature, "top_p": top_p, "top_k": sampling_top_k}
+        gen = self.settings.generation.model_copy(update={k: v for k, v in given.items() if v is not None})
 
         standalone = question
         if history and gen.rewrite_followups:
@@ -120,6 +127,15 @@ class Chatbot:
         timings["total"] = time.perf_counter() - t0
         log.info("q=%r standalone=%r mode=%s rerank=%s hits=%s", question, standalone, mode, rr, [h.id for h in hits])
         return ChatAnswer(question, standalone, text, hits, mode, rr, warnings, timings)
+
+
+def _check_sampling(temperature, top_p, top_k) -> None:
+    if temperature is not None and not 0 <= temperature <= 2:
+        raise ValueError(f"temperature must be between 0 and 2, got {temperature!r}")
+    if top_p is not None and not 0 < top_p <= 1:
+        raise ValueError(f"top_p must be in (0, 1], got {top_p!r}")
+    if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1):
+        raise ValueError(f"sampling_top_k must be an integer >= 1, got {top_k!r}")
 
 
 def _check(mode: str, rerank: str) -> None:

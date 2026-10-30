@@ -20,7 +20,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("git_ref", "qasper-corpus", "branch or commit of the code to run (db_run_all.py pins one commit)")
+dbutils.widgets.text("git_ref", "qasper-corpus", "branch or commit of the code to run (set a commit to reproduce a run exactly)")
 dbutils.widgets.text("git_dir", "/Workspace/Users/xizhurs@gmail.com/learning_agent", "Git folder with the code (repo root)")
 dbutils.widgets.text("data_dir", "/Volumes/workspace/default/documents/carbon_eval", "Volume folder with the data (results go to results/ inside it)")
 dbutils.widgets.text("endpoint", "databricks-meta-llama-3-1-8b-instruct", "serving endpoint (chat)")

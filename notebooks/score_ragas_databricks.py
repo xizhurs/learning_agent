@@ -18,7 +18,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("git_ref", "qasper-corpus", "branch or commit of the code to run (db_run_all.py pins one commit)")
+dbutils.widgets.text("git_ref", "qasper-corpus", "branch or commit of the code to run (set a commit to reproduce a run exactly)")
 dbutils.widgets.text("data_dir", "/Volumes/workspace/default/documents/carbon_eval", "Volume folder with the data")
 dbutils.widgets.text("gen_off", "20261029-122512_gen_1024idx_hybrid_rr-off_testset_val", "generation run folder (rerank off)")
 dbutils.widgets.text("gen_on", "20261029-122850_gen_1024idx_hybrid_rr-on_testset_val", "generation run folder (rerank on)")
@@ -209,7 +209,7 @@ for name in gen_runs:
 # COMMAND ----------
 
 # DBTITLE 1,Reset RAGAS scores
-# Runs only with `reset_scores = yes` (a full run, e.g. from db_run_all.py, must not wipe fresh scores).
+# Runs only with `reset_scores = yes` (a full run must not wipe fresh scores).
 # Start the RAGAS scoring over (e.g. after switching the judge model): back up the current partially scored run folders to
 # <data_dir>/results_ragas_backup/<timestamp>/, then restore the pristine, unscored files from <data_dir>/results/.
 import json, os, time
