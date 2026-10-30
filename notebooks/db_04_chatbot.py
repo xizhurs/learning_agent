@@ -11,13 +11,16 @@
 # MAGIC |---|---|---|
 # MAGIC | `retrieval_mode` | `fts` / `vector` / `hybrid` | AI Search `FULL_TEXT` / `ANN` / `HYBRID` query on the same index |
 # MAGIC | `rerank` | `off` / `ai_search` / `llm` | no rerank / the index's built-in reranker / a chat LLM ranks the top `candidates_k` hits (`rag.llm_rerank`) |
+# MAGIC | `temperature`, `top_p`, `sampling_top_k` | 0-2, (0-1], integer (0 = off) | sampling of the answer model. `top_p` 1 and `sampling_top_k` 0 are not sent (the model's default applies). `top_k` below is how many passages the model gets, not this. |
+# MAGIC
+# MAGIC The values of these five widgets are the starting values of the chat panel and the defaults of the logged agent; change them in the panel while chatting.
 # MAGIC
 # MAGIC Each answer is grounded in the retrieved passages, cites them as `[n]`, and says "I could not find this in the provided documents." when they do not
 # MAGIC contain the answer (same prompt and abstention rule as the evaluated pipeline, `rag.generate`). Follow-up questions are rewritten into standalone ones
 # MAGIC using the conversation so far. If a reranker fails, the answer is produced without it and the warning is shown.
 # MAGIC
 # MAGIC The same code is packaged as an MLflow `ResponsesAgent` (`rag.serving_agent`, entry file `carbon_rag_agent.py`) by the last cell, so the chatbot can be registered in Unity
-# MAGIC Catalog and served; the two options then travel in `custom_inputs`. Deploying it to Model Serving is a separate, paid step that this notebook does not do.
+# MAGIC Catalog and served; the options (`retrieval_mode`, `rerank`, `temperature`, `top_p`, `sampling_top_k`) then travel in `custom_inputs`. Deploying it to Model Serving is a separate, paid step that this notebook does not do.
 # MAGIC **Data:** questions and the retrieved passages are sent to the Databricks endpoints named below. The index holds public documents only (see `db_01b_load_chunks_parquet.py`);
 # MAGIC do not point `index_name` at an index with non-public content.
 # MAGIC **Not measured:** which option is best is decided by `db_pipeline.py` on the val questions, not by this notebook. Run `db_02_ai_search_index.py` first (the index must exist).
@@ -32,7 +35,9 @@ dbutils.widgets.text("top_k", "5", "passages given to the model")
 dbutils.widgets.text("candidates_k", "20", "hits ranked by the LLM reranker")
 dbutils.widgets.dropdown("retrieval_mode", "hybrid", ["fts", "vector", "hybrid"], "retrieval mode")
 dbutils.widgets.dropdown("rerank", "off", ["off", "ai_search", "llm"], "rerank")
-dbutils.widgets.text("question", "", "question (then run the 'Ask' cell)")
+dbutils.widgets.text("temperature", "0.0", "answer temperature (0-2)")
+dbutils.widgets.text("top_p", "1.0", "answer top_p (1 = not sent)")
+dbutils.widgets.text("sampling_top_k", "0", "answer sampling top-k (0 = not sent)")
 dbutils.widgets.text("probe_question", "What is the minimum buffer between monitoring instances?", "question for the start-up check")
 dbutils.widgets.dropdown("log_agent", "no", ["no", "yes"], "last cell: log the agent to MLflow")
 dbutils.widgets.text("uc_model_name", "", "last cell: Unity Catalog model name to register (catalog.schema.model); empty = log only")
@@ -73,6 +78,9 @@ CONFIG = {
     "generation_endpoint": dbutils.widgets.get("gen_endpoint"), "rerank_endpoint": dbutils.widgets.get("rerank_endpoint"),
     "top_k": int(dbutils.widgets.get("top_k")), "candidates_k": int(dbutils.widgets.get("candidates_k")),
     "retrieval_mode": dbutils.widgets.get("retrieval_mode"), "rerank": dbutils.widgets.get("rerank"),
+    "temperature": float(dbutils.widgets.get("temperature")),
+    "top_p": float(dbutils.widgets.get("top_p")) if float(dbutils.widgets.get("top_p")) != 1.0 else None,   # None = not sent
+    "sampling_top_k": int(dbutils.widgets.get("sampling_top_k")) or None,
 }
 agent = build_agent(CONFIG)
 bot = agent.chatbot
@@ -96,28 +104,58 @@ for mode, rr in rows:
 
 # COMMAND ----------
 
-# DBTITLE 1,Ask
-# Type the question in the `question` widget, pick the options, run this cell. Re-run it with a new question to continue the conversation.
-q = dbutils.widgets.get("question").strip()
-if not q:
-    print("Type a question in the `question` widget first.")
-else:
-    a = bot.ask(q, history, retrieval_mode=dbutils.widgets.get("retrieval_mode"), rerank=dbutils.widgets.get("rerank"))
-    history += [{"role": "user", "content": q}, {"role": "assistant", "content": a.answer}]
-    if a.standalone_question != q:
-        print(f"(searched as: {a.standalone_question})\n")
-    print(a.answer)
-    if a.hits and a.answer != "I could not find this in the provided documents.":
-        print("\nSources:\n" + "\n".join(a.sources()))
-    for w in a.warnings:
-        print("WARNING:", w)
-    print(f"\n[{a.retrieval_mode} | rerank {a.rerank} | " + " ".join(f"{k} {v:.1f}s" for k, v in a.timings.items()) + f" | turn {len(history) // 2}]")
+# DBTITLE 1,Chat
+# Type in the box and press Send; the options and the sampling sliders apply to the next answer. Clear starts a new conversation.
+import ipywidgets as w
+from IPython.display import display
 
-# COMMAND ----------
+style = {"description_width": "90px"}
+mode_w = w.Dropdown(options=["fts", "vector", "hybrid"], value=CONFIG["retrieval_mode"], description="retrieval", style=style)
+rerank_w = w.Dropdown(options=["off", "ai_search", "llm"], value=CONFIG["rerank"], description="rerank", style=style)
+temp_w = w.FloatSlider(value=CONFIG["temperature"], min=0, max=1.5, step=0.05, description="temperature", style=style)
+top_p_w = w.FloatSlider(value=CONFIG["top_p"] or 1.0, min=0.05, max=1.0, step=0.05, description="top_p (1 = off)", style=style)
+top_k_w = w.IntSlider(value=CONFIG["sampling_top_k"] or 0, min=0, max=100, description="top-k (0 = off)", style=style)
+box = w.Text(placeholder="Ask a question", layout=w.Layout(width="75%"))
+send, clear, status = w.Button(description="Send", button_style="primary"), w.Button(description="Clear"), w.Label()
+log = w.Output(layout=w.Layout(border="1px solid #ccc", padding="6px", max_height="480px", overflow_y="auto"))
 
-# DBTITLE 1,Clear conversation
-history.clear()
-print("conversation cleared")
+
+def on_send(_):
+    q = box.value.strip()
+    if not q:
+        return
+    box.value, send.disabled, status.value = "", True, "working..."
+    with log:
+        print(f"YOU: {q}")
+        try:
+            a = bot.ask(
+                q, history, retrieval_mode=mode_w.value, rerank=rerank_w.value, temperature=temp_w.value,
+                top_p=top_p_w.value if top_p_w.value != 1.0 else None, sampling_top_k=top_k_w.value or None,
+            )
+        except Exception as e:
+            print(f"ERROR {type(e).__name__}: {e}\n")
+        else:
+            history.extend([{"role": "user", "content": q}, {"role": "assistant", "content": a.answer}])
+            if a.standalone_question != q:
+                print(f"(searched as: {a.standalone_question})")
+            print(f"BOT: {a.answer}")
+            if a.hits and a.answer != "I could not find this in the provided documents.":
+                print("Sources:\n" + "\n".join(a.sources()))
+            for msg in a.warnings:
+                print("WARNING:", msg)
+            print(f"[{a.retrieval_mode} | rerank {a.rerank} | T {temp_w.value} p {top_p_w.value} k {top_k_w.value or '-'} | "
+                  + " ".join(f"{k} {v:.1f}s" for k, v in a.timings.items()) + f" | turn {len(history) // 2}]\n")
+    send.disabled, status.value = False, ""
+
+
+def on_clear(_):
+    history.clear()
+    log.clear_output()
+
+
+send.on_click(on_send)
+clear.on_click(on_clear)
+display(w.VBox([w.HBox([mode_w, rerank_w]), w.HBox([temp_w, top_p_w, top_k_w]), w.HBox([box, send, clear, status]), log]))
 
 # COMMAND ----------
 

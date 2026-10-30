@@ -124,3 +124,34 @@ def test_a_plain_retrieval_error_is_not_swallowed():
 
     with pytest.raises(ConnectionError):
         _bot(FakeClient("x"), Down(_response(ROWS))).ask("What?")
+
+
+def test_sampling_options_apply_to_one_answer_and_do_not_change_the_settings():
+    client = FakeClient("Alpha [1]", "Beta [1]")
+    bot = _bot(client)
+    bot.ask("What?", temperature=0.8, top_p=0.9, sampling_top_k=30)
+    assert client.calls[0]["temperature"] == 0.8 and client.calls[0]["top_p"] == 0.9
+    assert client.calls[0]["extra_body"] == {"top_k": 30}
+    bot.ask("What?")  # the next answer is back to the settings
+    assert (
+        client.calls[1]["temperature"] == 0.0 and "top_p" not in client.calls[1] and "extra_body" not in client.calls[1]
+    )
+    assert bot.settings.generation.top_p is None
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"temperature": -0.1},
+        {"temperature": 2.5},
+        {"top_p": 0},
+        {"top_p": 1.5},
+        {"sampling_top_k": 0},
+        {"sampling_top_k": 2.5},
+    ],
+)
+def test_invalid_sampling_options_are_rejected_before_any_model_call(kw):
+    client = FakeClient("x")
+    with pytest.raises(ValueError):
+        _bot(client).ask("What?", **kw)
+    assert client.calls == []

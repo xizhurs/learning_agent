@@ -1,6 +1,7 @@
 """MLflow ResponsesAgent around rag.chat.Chatbot, so the chatbot can be logged, registered and served on Databricks.
 
-Per-request options travel in `custom_inputs`: {"retrieval_mode": "fts" | "vector" | "hybrid", "rerank": "off" | "ai_search" | "llm"}.
+Per-request options travel in `custom_inputs`: {"retrieval_mode": "fts" | "vector" | "hybrid", "rerank": "off" | "ai_search" | "llm",
+"temperature": float, "top_p": float, "sampling_top_k": int}; all are optional.
 Needs mlflow; only import this module where mlflow is installed (Databricks serverless has it).
 """
 
@@ -25,6 +26,9 @@ DEFAULTS = {
     "candidates_k": 20,
     "retrieval_mode": "hybrid",
     "rerank": "off",
+    "temperature": 0.0,
+    "top_p": None,  # None = not sent
+    "sampling_top_k": None,  # generation sampling top-k, not the retrieval top_k above
 }
 
 
@@ -54,6 +58,9 @@ class CarbonRagAgent(ResponsesAgent):
             turns[:-1],
             retrieval_mode=opts.get("retrieval_mode"),
             rerank=opts.get("rerank"),
+            temperature=opts.get("temperature"),
+            top_p=opts.get("top_p"),
+            sampling_top_k=opts.get("sampling_top_k"),
         )
         text = ans.answer
         if ans.hits and text != NOT_FOUND:
@@ -81,7 +88,12 @@ def build_agent(config: dict | None = None) -> CarbonRagAgent:
     cfg = DEFAULTS | (config or {})
     settings = Settings(
         retrieval=Retrieval(top_k=cfg["top_k"], candidates_k=cfg["candidates_k"]),
-        generation=Generation(model=cfg["generation_endpoint"]),
+        generation=Generation(
+            model=cfg["generation_endpoint"],
+            temperature=cfg["temperature"],
+            top_p=cfg["top_p"],
+            top_k=cfg["sampling_top_k"],
+        ),
     )
     client = DatabricksOpenAI(max_retries=6)
     index = AISearchClient().get_index(endpoint_name=cfg["search_endpoint"], index_name=cfg["index_name"])

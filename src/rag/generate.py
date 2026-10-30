@@ -96,12 +96,17 @@ def _openai_stats(resp) -> dict:
 
 
 def _options(cfg: Generation) -> dict:
-    return {
+    opts = {
         "temperature": cfg.temperature,
         "num_ctx": cfg.num_ctx,
         "num_predict": cfg.max_answer_tokens,
         "repeat_penalty": cfg.repeat_penalty,
     }
+    if cfg.top_p is not None:
+        opts["top_p"] = cfg.top_p
+    if cfg.top_k is not None:
+        opts["top_k"] = cfg.top_k
+    return opts
 
 
 def _ollama_stats(resp) -> dict:
@@ -145,9 +150,16 @@ def generate(messages: list[dict], cfg: Generation, span: Span | None = None) ->
     step = child_of(span, "generate", "llm")
     if _chat_client is not None:
         opts = {"temperature": cfg.temperature, "max_tokens": cfg.max_answer_tokens}
-        resp = _chat_client.chat.completions.create(model=cfg.model, messages=messages, **opts)
+        if cfg.top_p is not None:
+            opts["top_p"] = cfg.top_p
+        extra = (
+            {"top_k": cfg.top_k} if cfg.top_k is not None else {}
+        )  # not an OpenAI parameter: sent in the request body
+        resp = _chat_client.chat.completions.create(
+            model=cfg.model, messages=messages, **opts, **({"extra_body": extra} if extra else {})
+        )
         text = (resp.choices[0].message.content or "").strip()
-        step.set_llm(cfg.model, messages, text, opts)
+        step.set_llm(cfg.model, messages, text, opts | extra)
         step.end(output=text, **_openai_stats(resp))
         return text
     resp = _ollama().chat(model=cfg.model, messages=messages, options=_options(cfg))

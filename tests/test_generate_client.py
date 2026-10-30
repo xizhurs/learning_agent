@@ -61,3 +61,23 @@ def test_without_a_client_generate_still_calls_ollama(monkeypatch):
     monkeypatch.setattr(gen.ollama, "chat", fake_chat)
     assert gen.generate([{"role": "user", "content": "q"}], Generation(model="llama3.2:3b")) == "from ollama"
     assert seen["model"] == "llama3.2:3b" and seen["options"]["repeat_penalty"] == 1.1
+
+
+def test_top_p_and_top_k_reach_the_client_only_when_set():
+    client = FakeClient()
+    gen.set_chat_client(client)
+    cfg = Generation(model="endpoint-x", temperature=0.7, top_p=0.9, top_k=40, max_answer_tokens=400)
+    gen.generate([{"role": "user", "content": "q"}], cfg)
+    assert client.calls[0]["temperature"] == 0.7 and client.calls[0]["top_p"] == 0.9
+    assert client.calls[0]["extra_body"] == {"top_k": 40}  # top_k is not an OpenAI parameter
+    gen.generate([{"role": "user", "content": "q"}], Generation(model="endpoint-x", top_p=0.5))
+    assert "top_p" in client.calls[1] and "extra_body" not in client.calls[1]
+
+
+def test_ollama_options_include_top_p_and_top_k_only_when_set(monkeypatch):
+    seen = []
+    monkeypatch.setattr(gen.ollama, "chat", lambda **kw: seen.append(kw) or {"message": {"content": "x"}})
+    gen.generate([{"role": "user", "content": "q"}], Generation(top_p=0.9, top_k=20))
+    gen.generate([{"role": "user", "content": "q"}], Generation())
+    assert seen[0]["options"]["top_p"] == 0.9 and seen[0]["options"]["top_k"] == 20
+    assert "top_p" not in seen[1]["options"] and "top_k" not in seen[1]["options"]

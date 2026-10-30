@@ -56,6 +56,8 @@ class Rerank(BaseModel):
 class Generation(BaseModel):
     model: str = "llama3.2:3b"
     temperature: float = 0.0
+    top_p: float | None = None  # sampling; None = not sent, the model's default applies
+    top_k: int | None = None  # sampling (not the retrieval top_k); None = not sent
     num_ctx: int = 8192
     max_answer_tokens: int = 400
     repeat_penalty: float = 1.1

@@ -11,10 +11,11 @@ from rag.serving_agent import CarbonRagAgent  # noqa: E402
 
 class FakeBot:
     def __init__(self, answer="Alpha [1]", hits=1):
-        self.calls, self._answer, self._hits = [], answer, hits
+        self.calls, self.sampling, self._answer, self._hits = [], [], answer, hits
 
-    def ask(self, question, history, retrieval_mode=None, rerank=None):
+    def ask(self, question, history, retrieval_mode=None, rerank=None, **sampling):
         self.calls.append((question, history, retrieval_mode, rerank))
+        self.sampling.append(sampling)
         from rag.ai_search import SearchHit
 
         hits = [SearchHit("i", "d.pdf", 3, "Intro", "text", "t", 1.0, 1.0)] * self._hits
@@ -48,6 +49,14 @@ def test_history_options_and_sources_flow_through():
     text = resp.output[0].content[0]["text"]
     assert text.startswith("Alpha [1]") and "Sources:\n[1] d.pdf, p.3 | Intro" in text
     assert resp.custom_outputs["retrieval_mode"] == "fts" and resp.custom_outputs["timings"] == {"total": 1.235}
+
+
+def test_sampling_options_come_from_custom_inputs():
+    bot = FakeBot()
+    CarbonRagAgent(bot).predict(_request(custom_inputs={"temperature": 0.7, "top_p": 0.9, "sampling_top_k": 40}))
+    assert bot.sampling == [{"temperature": 0.7, "top_p": 0.9, "sampling_top_k": 40}]
+    CarbonRagAgent(bot).predict(_request())
+    assert bot.sampling[1] == {"temperature": None, "top_p": None, "sampling_top_k": None}
 
 
 def test_abstention_has_no_sources_block_and_options_are_optional():

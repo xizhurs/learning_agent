@@ -230,7 +230,7 @@ Each notebook clones the `qasper-corpus` branch from GitHub, so push before runn
 | `db_03_retrieval_eval.py` | retrieval-only runs; variants `off` (hybrid), `on` (AI Search reranker), `llm` (chat-LLM reranker) |
 | `generate_val_databricks.py`, `score_ragas_databricks.py` | answers from saved chunks, then RAGAS (the optional third `llm` run via `ret_llm` / `gen_llm`) |
 | `db_pipeline.py` | the whole chain in one notebook and one environment: index -> retrieval (`off` / `on` / `llm`) -> generation -> RAGAS -> comparison table; saves the runs and the pinned code commit to `<data_dir>/pipeline_runs/` |
-| `db_04_chatbot.py` | multi-turn chatbot with a retrieval-mode (`fts`/`vector`/`hybrid`) and rerank (`off`/`ai_search`/`llm`) choice; optionally logs an MLflow `ResponsesAgent` |
+| `db_04_chatbot.py` | multi-turn chatbot with a retrieval-mode (`fts`/`vector`/`hybrid`) and rerank (`off`/`ai_search`/`llm`) choice and temperature / top_p / sampling top-k sliders, in a chat panel (type, press Send); optionally logs an MLflow `ResponsesAgent` |
 
 **Changed defaults.** `db_03_retrieval_eval.py` now defaults to `variants = off:5,llm:5`; the earlier val comparison used
 `off:5,on:5,off:7,on:7` (set the widget back to reproduce it; `on` is the AI Search reranker, which Free Edition does not run). The LLM
