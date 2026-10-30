@@ -44,16 +44,39 @@ from rag.tracing import annotate, start_trace
 from rag.tracing import enabled as tracing_enabled
 from rag.tracing import flush as flush_traces
 
+_retriever = None
+_index_check = None
+
+
+def _no_index_check(settings: Settings) -> None:
+    """The injected backend (e.g. Databricks AI Search) owns its index; there is nothing to build locally."""
+
+
+def set_retriever(retrieve_fn=None, index_check_fn=None) -> None:
+    """Replace the retrieval backend for this process: `retrieve_fn(query, settings, table=None, span=None) -> hits`
+    (see rag.ai_search.make_retriever). The local index check is skipped unless `index_check_fn` is given. Called with no
+    arguments it restores the local LanceDB retrieval. Injected, not configured, so `Settings` (and --resume) is unchanged.
+    """
+    global _retriever, _index_check
+    _retriever = retrieve_fn
+    _index_check = (
+        index_check_fn if index_check_fn is not None else (_no_index_check if retrieve_fn is not None else None)
+    )
+
 
 # Thin wrappers: importing rag.ingest.build / rag.retrieve at module level would pull in docling and lancedb, which a
 # generation-only run (--reuse-retrieval, e.g. on Databricks) neither has nor needs.
 def ensure_table(settings: Settings):
+    if _index_check is not None:
+        return _index_check(settings)
     from rag.ingest.build import ensure_table as _ensure_table
 
     return _ensure_table(settings)
 
 
 def retrieve(*args, **kwargs):
+    if _retriever is not None:
+        return _retriever(*args, **kwargs)
     from rag.retrieve import retrieve as _retrieve
 
     return _retrieve(*args, **kwargs)
