@@ -20,13 +20,16 @@
 
 # COMMAND ----------
 
+dbutils.widgets.text("git_ref", "qasper-corpus", "branch or commit of the code to run (db_run_all.py pins one commit)")
 dbutils.widgets.text("git_dir", "/Workspace/Users/xizhurs@gmail.com/learning_agent", "Git folder with the code (repo root)")
 dbutils.widgets.text("data_dir", "/Volumes/workspace/default/documents/carbon_eval", "Volume folder with the data (results go to results/ inside it)")
 dbutils.widgets.text("endpoint", "databricks-meta-llama-3-1-8b-instruct", "serving endpoint (chat)")
 dbutils.widgets.text("ret_off", "20261028-140242_ret_1024idx_hybrid_rr-off_testset_val", "retrieval run (rerank off)")
 dbutils.widgets.text("ret_on", "20261028-140306_ret_1024idx_hybrid_rr-on_testset_val", "retrieval run (rerank on)")
+dbutils.widgets.text("ret_llm", "", "retrieval run (LLM rerank), optional: empty = no third variant")
 dbutils.widgets.text("resume_off", "", "resume: generation run folder name (rerank off), optional")
 dbutils.widgets.text("resume_on", "", "resume: generation run folder name (rerank on), optional")
+dbutils.widgets.text("resume_llm", "", "resume: generation run folder name (LLM rerank), optional")
 
 # COMMAND ----------
 
@@ -37,15 +40,17 @@ import os, shutil, subprocess
 git_dir = dbutils.widgets.get("git_dir")
 data_dir = dbutils.widgets.get("data_dir")
 REPO = "/tmp/carbon_methodology"
-ret_runs = [dbutils.widgets.get("ret_off"), dbutils.widgets.get("ret_on")]
+ret_runs = [dbutils.widgets.get(w) for w in ("ret_off", "ret_on", "ret_llm") if dbutils.widgets.get(w)]
 
 # The workspace Git folder's file storage is corrupted (reads return Errno 5 Input/output error), and re-clones
 # through the workspace keep failing the same way. Pull the code straight from GitHub (public repo) onto local
 # disk instead and stage from that copy.
 clone_dir = "/tmp/learning_agent_git"
-if not os.path.isfile(f"{clone_dir}/src/rag/config.py"):
-    subprocess.run(["git", "clone", "--depth", "1", "--branch", "qasper-corpus",
-                    "https://github.com/xizhurs/learning_agent", clone_dir], check=True)
+if os.path.isdir(clone_dir):
+    shutil.rmtree(clone_dir)                     # always the requested commit, never a stale clone
+subprocess.run(["git", "init", "-q", clone_dir], check=True)      # fetch a branch or an exact commit (widget git_ref)
+subprocess.run(["git", "-C", clone_dir, "fetch", "-q", "--depth", "1", "https://github.com/xizhurs/learning_agent", dbutils.widgets.get("git_ref")], check=True)
+subprocess.run(["git", "-C", clone_dir, "checkout", "-q", "FETCH_HEAD"], check=True)
 git_dir = clone_dir
 
 needed = [f"{git_dir}/src/rag/config.py", f"{git_dir}/config.yaml", f"{git_dir}/notebooks/databricks-requirements.txt",
@@ -130,7 +135,7 @@ import shutil
 from rag.config import get_settings
 from rag.eval import run_eval
 
-def run_variant(label: str, rerank: str, ret_widget: str, resume_widget: str) -> None:
+def run_variant(label: str, rerank: str, ret_widget: str, resume_widget: str) -> str:
     os.environ.update({
         "RAG__CHUNKING__MAX_TOKENS": "1024", "RAG__CHUNKING__OVERLAP": "128", "RAG__RETRIEVAL__MODE": "hybrid",
         "RAG__PATHS__TABLE_NAME": "chunks_heading_aware_1024_128", "RAG__RERANK__ENABLED": rerank,
@@ -147,12 +152,20 @@ def run_variant(label: str, rerank: str, ret_widget: str, resume_widget: str) ->
     dest = f"{data_dir}/results/{new}"
     shutil.copytree(f"{runs_dir}/{new}", dest, dirs_exist_ok=True)
     print("copied", new, "->", dest)
+    return new
 
-run_variant("off", "false", "ret_off", "resume_off")
+gen_names = {}
+gen_names["off"] = run_variant("off", "false", "ret_off", "resume_off")
 
 # COMMAND ----------
 
-run_variant("on", "true", "ret_on", "resume_on")
+gen_names["on"] = run_variant("on", "true", "ret_on", "resume_on")
+
+# COMMAND ----------
+
+# Third variant (rerank by a chat LLM, db_03's `llm` variant): same generation settings, only when `ret_llm` is set.
+if dbutils.widgets.get("ret_llm"):
+    gen_names["llm"] = run_variant("llm", "true", "ret_llm", "resume_llm")
 
 # COMMAND ----------
 
@@ -165,3 +178,4 @@ for d in sorted(os.listdir(runs_dir)):
 
 # COMMAND ----------
 
+dbutils.notebook.exit(json.dumps({"gen_runs": gen_names}))

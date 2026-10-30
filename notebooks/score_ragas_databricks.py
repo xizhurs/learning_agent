@@ -18,9 +18,12 @@
 
 # COMMAND ----------
 
+dbutils.widgets.text("git_ref", "qasper-corpus", "branch or commit of the code to run (db_run_all.py pins one commit)")
 dbutils.widgets.text("data_dir", "/Volumes/workspace/default/documents/carbon_eval", "Volume folder with the data")
 dbutils.widgets.text("gen_off", "20261029-122512_gen_1024idx_hybrid_rr-off_testset_val", "generation run folder (rerank off)")
 dbutils.widgets.text("gen_on", "20261029-122850_gen_1024idx_hybrid_rr-on_testset_val", "generation run folder (rerank on)")
+dbutils.widgets.text("gen_llm", "", "generation run folder (LLM rerank), optional: empty = not scored")
+dbutils.widgets.dropdown("reset_scores", "no", ["no", "yes"], "run the Reset RAGAS scores cell (wipes scores)")
 dbutils.widgets.text("judge_endpoint", "databricks-qwen3-next-80b-a3b-instruct", "judge chat endpoint")
 dbutils.widgets.text("embed_endpoint", "databricks-gte-large-en", "embeddings endpoint (confirm the name in the list below)")
 dbutils.widgets.text("workers", "4", "parallel judge calls (8 hit the workspace QPS limit on gpt-oss-120b)")
@@ -32,13 +35,14 @@ dbutils.widgets.text("metrics", "", "optional: comma-separated subset of metrics
 import os, shutil, subprocess
 data_dir = dbutils.widgets.get("data_dir")
 REPO = "/tmp/carbon_methodology"
-gen_runs = [dbutils.widgets.get("gen_off"), dbutils.widgets.get("gen_on")]
+gen_runs = [dbutils.widgets.get(w) for w in ("gen_off", "gen_on", "gen_llm") if dbutils.widgets.get(w)]
 
 clone_dir = "/tmp/learning_agent_git"
 if os.path.isdir(clone_dir):
     shutil.rmtree(clone_dir)                     # always take the latest pushed commit
-subprocess.run(["git", "clone", "--depth", "1", "--branch", "qasper-corpus",
-                "https://github.com/xizhurs/learning_agent", clone_dir], check=True)
+subprocess.run(["git", "init", "-q", clone_dir], check=True)      # fetch a branch or an exact commit (widget git_ref)
+subprocess.run(["git", "-C", clone_dir, "fetch", "-q", "--depth", "1", "https://github.com/xizhurs/learning_agent", dbutils.widgets.get("git_ref")], check=True)
+subprocess.run(["git", "-C", clone_dir, "checkout", "-q", "FETCH_HEAD"], check=True)
 
 needed = [f"{clone_dir}/src/rag/config.py", f"{clone_dir}/config.yaml", f"{clone_dir}/notebooks/databricks-requirements-ragas.txt"]
 for r in gen_runs:
@@ -92,7 +96,7 @@ REPO = "/tmp/carbon_methodology"
 sys.path.insert(0, f"{REPO}/src")
 data_dir = dbutils.widgets.get("data_dir")
 runs_dir = f"{REPO}/data/eval/runs"
-gen_runs = [dbutils.widgets.get("gen_off"), dbutils.widgets.get("gen_on")]
+gen_runs = [dbutils.widgets.get(w) for w in ("gen_off", "gen_on", "gen_llm") if dbutils.widgets.get(w)]
 judge_endpoint = dbutils.widgets.get("judge_endpoint")
 embed_endpoint = dbutils.widgets.get("embed_endpoint")
 
@@ -205,28 +209,30 @@ for name in gen_runs:
 # COMMAND ----------
 
 # DBTITLE 1,Reset RAGAS scores
+# Runs only with `reset_scores = yes` (a full run, e.g. from db_run_all.py, must not wipe fresh scores).
 # Start the RAGAS scoring over (e.g. after switching the judge model): back up the current partially scored run folders to
 # <data_dir>/results_ragas_backup/<timestamp>/, then restore the pristine, unscored files from <data_dir>/results/.
 import json, os, time
-REPO = "/tmp/carbon_methodology"
-data_dir = dbutils.widgets.get("data_dir")
-stamp = time.strftime("%Y%m%d-%H%M%S")
-for r in (dbutils.widgets.get("gen_off"), dbutils.widgets.get("gen_on")):
-    run_dir = f"{REPO}/data/eval/runs/{r}"
-    src_dir = f"{data_dir}/results/{r}"
-    scored = sum(1 for l in open(f"{run_dir}/items.jsonl", encoding="utf-8") if l.strip() and json.loads(l).get("ragas"))
-    if scored:
-        bak = f"{data_dir}/results_ragas_backup/{stamp}/{r}"
-        os.makedirs(bak, exist_ok=True)
+if dbutils.widgets.get("reset_scores") == "yes":
+    REPO = "/tmp/carbon_methodology"
+    data_dir = dbutils.widgets.get("data_dir")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for r in gen_runs:
+        run_dir = f"{REPO}/data/eval/runs/{r}"
+        src_dir = f"{data_dir}/results/{r}"
+        scored = sum(1 for l in open(f"{run_dir}/items.jsonl", encoding="utf-8") if l.strip() and json.loads(l).get("ragas"))
+        if scored:
+            bak = f"{data_dir}/results_ragas_backup/{stamp}/{r}"
+            os.makedirs(bak, exist_ok=True)
+            for f in ("items.jsonl", "config.json", "summary.json"):
+                with open(f"{run_dir}/{f}", "rb") as a, open(f"{bak}/{f}", "wb") as b:
+                    b.write(a.read())
+            print(f"backed up {scored} scored rows -> {bak}")
         for f in ("items.jsonl", "config.json", "summary.json"):
-            with open(f"{run_dir}/{f}", "rb") as a, open(f"{bak}/{f}", "wb") as b:
+            with open(f"{src_dir}/{f}", "rb") as a, open(f"{run_dir}/{f}", "wb") as b:
                 b.write(a.read())
-        print(f"backed up {scored} scored rows -> {bak}")
-    for f in ("items.jsonl", "config.json", "summary.json"):
-        with open(f"{src_dir}/{f}", "rb") as a, open(f"{run_dir}/{f}", "wb") as b:
-            b.write(a.read())
-    n = sum(1 for l in open(f"{run_dir}/items.jsonl", encoding="utf-8") if l.strip() and json.loads(l).get("ragas"))
-    print(f"{r}: reset; {n} scored rows remain")
+        n = sum(1 for l in open(f"{run_dir}/items.jsonl", encoding="utf-8") if l.strip() and json.loads(l).get("ragas"))
+        print(f"{r}: reset; {n} scored rows remain")
 
 # COMMAND ----------
 
@@ -243,3 +249,7 @@ for name in gen_runs:
     miss = [r["id"] for r in ans if not r.get("ragas") or any(v is None for v in r["ragas"].values())]
     print(f"  items with a missing score: {len(miss)} of {len(ans)}", miss[:10])
 print("\nDownload items.jsonl and summary.json of both folders from <data_dir>/results_ragas/ into local data/eval/runs/ (overwrite).")
+
+# COMMAND ----------
+
+dbutils.notebook.exit(json.dumps({"scored_runs": gen_runs, "summaries": {n: json.load(open(f"{runs_dir}/{n}/summary.json", encoding="utf-8")) for n in gen_runs}}, default=str))

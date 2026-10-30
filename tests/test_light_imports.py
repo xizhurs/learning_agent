@@ -23,3 +23,9 @@ def test_ai_search_module_imports_without_databricks_or_retrieval_dependencies()
     """rag.ai_search is testable here and importable on serverless before databricks-ai-search is installed."""
     r = _imports_with_blocked(["rag.ai_search", "rag.eval.run_eval"], BLOCKED + ["databricks"])
     assert r.returncode == 0, r.stderr
+
+
+def test_chat_and_llm_rerank_import_without_databricks_or_retrieval_dependencies():
+    """The chatbot core runs on serverless: no lancedb, docling, torch, ollama or databricks at import time."""
+    r = _imports_with_blocked(["rag.chat", "rag.llm_rerank"], BLOCKED + ["databricks"])
+    assert r.returncode == 0, r.stderr

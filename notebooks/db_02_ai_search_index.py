@@ -16,6 +16,7 @@
 
 # COMMAND ----------
 
+dbutils.widgets.text("git_ref", "qasper-corpus", "branch or commit of the code to run (db_run_all.py pins one commit)")
 dbutils.widgets.text("data_dir", "/Volumes/workspace/default/documents/carbon_eval", "Volume folder with testset_val.jsonl")
 dbutils.widgets.text("source_table", "workspace.carbon_rag.chunks_1024", "chunks Delta table")
 dbutils.widgets.text("index_name", "workspace.carbon_rag.chunks_1024_idx", "AI Search index name")
@@ -34,7 +35,9 @@ REPO, clone_dir = "/tmp/carbon_methodology", "/tmp/learning_agent_git"
 data_dir = dbutils.widgets.get("data_dir")
 if os.path.isdir(clone_dir):
     shutil.rmtree(clone_dir)
-subprocess.run(["git", "clone", "--depth", "1", "--branch", "qasper-corpus", "https://github.com/xizhurs/learning_agent", clone_dir], check=True)
+subprocess.run(["git", "init", "-q", clone_dir], check=True)      # fetch a branch or an exact commit (widget git_ref)
+subprocess.run(["git", "-C", clone_dir, "fetch", "-q", "--depth", "1", "https://github.com/xizhurs/learning_agent", dbutils.widgets.get("git_ref")], check=True)
+subprocess.run(["git", "-C", clone_dir, "checkout", "-q", "FETCH_HEAD"], check=True)
 for sub in ("src", "notebooks"):
     shutil.copytree(f"{clone_dir}/{sub}", f"{REPO}/{sub}", dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
 shutil.copy(f"{clone_dir}/config.yaml", f"{REPO}/config.yaml")
