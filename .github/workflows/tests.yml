@@ -3,11 +3,9 @@ name: tests
 on:
   pull_request:
     branches: [main]
-    types: [closed]
 
 jobs:
   pytest:
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
