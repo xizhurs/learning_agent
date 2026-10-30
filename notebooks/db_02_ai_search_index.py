@@ -1,6 +1,7 @@
 # Databricks notebook source
 # /// script
 # [tool.databricks.environment]
+# base_environment = "databricks_ai_v6"
 # environment_version = "6"
 # ///
 # MAGIC %md
@@ -162,19 +163,24 @@ reranked = make_retriever(index, rerank=True, reranker=DatabricksReranker(column
 ranks, rerank_ok = [], True
 for q in questions:
     row = {"id": q["id"]}
-    for name, retriever in (("hybrid", plain), ("hybrid+rerank", reranked)):
+    t0 = time.time()
+    hits = plain(q["question"], settings)                      # plain hybrid must work
+    row["hybrid"] = first_hit_rank(q["reference_quote"], [h.text for h in hits], settings.eval.overlap_threshold)
+    row["hybrid s"] = round(time.time() - t0, 2)
+    if reranked is not None:                                   # the reranker degrades to hybrid-only on the first failure
         t0 = time.time()
         try:
-            hits = retriever(q["question"], settings)
-            row[name] = first_hit_rank(q["reference_quote"], [h.text for h in hits], settings.eval.overlap_threshold)
-            row[name + " s"] = round(time.time() - t0, 2)
-        except RerankerUnavailable as e:
-            row[name] = f"RERANKER PROBLEM: {str(e)[:200]}"
+            hits = reranked(q["question"], settings)
+            row["hybrid+rerank"] = first_hit_rank(q["reference_quote"], [h.text for h in hits], settings.eval.overlap_threshold)
+            row["hybrid+rerank s"] = round(time.time() - t0, 2)
+        except Exception as e:                                 # RerankerUnavailable, or the SDK's BadRequest when the workspace blocks the reranker
+            row["hybrid+rerank"] = f"RERANKER PROBLEM: {str(e)[:150]}"
+            reranked = None
             rerank_ok = False
     ranks.append(row)
     print(row)
-print("reranker stats:", reranked.stats)
-status.update(smoke=ranks, reranker_ok=rerank_ok, reranker_stats=reranked.stats)
+print("reranker stats:", reranked.stats if reranked is not None else "unavailable in this workspace; hybrid-only")
+status.update(smoke=ranks, reranker_ok=rerank_ok, reranker_stats=reranked.stats if reranked is not None else {"note": "unavailable in this workspace"})
 found = sum(isinstance(r.get("hybrid"), int) for r in ranks)
 print(f"gold quote in the top 5 for hybrid on {found} of {len(ranks)} questions; reranker problems: {not rerank_ok}")
 assert found > 0, "no question found its evidence: check the index content and the embeddings endpoint"
