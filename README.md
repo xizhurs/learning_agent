@@ -229,14 +229,19 @@ Each notebook clones the `qasper-corpus` branch from GitHub, so push before runn
 | `db_01b_load_chunks_parquet.py` / `db_02_ai_search_index.py` | chunks Delta table -> AI Search index (the managed embeddings) |
 | `db_03_retrieval_eval.py` | retrieval-only runs; variants `off` (hybrid), `on` (AI Search reranker), `llm` (chat-LLM reranker) |
 | `generate_val_databricks.py`, `score_ragas_databricks.py` | answers from saved chunks, then RAGAS (the optional third `llm` run via `ret_llm` / `gen_llm`) |
-| `db_run_all.py` | runs db_02 -> db_03 -> generation -> RAGAS in one go and writes a record to `<data_dir>/pipeline_runs/` |
+| `db_pipeline.py` | the whole chain in one notebook and one environment: index -> retrieval (`off` / `on` / `llm`) -> generation -> RAGAS -> comparison table; saves the runs and the pinned code commit to `<data_dir>/pipeline_runs/` |
 | `db_04_chatbot.py` | multi-turn chatbot with a retrieval-mode (`fts`/`vector`/`hybrid`) and rerank (`off`/`ai_search`/`llm`) choice; optionally logs an MLflow `ResponsesAgent` |
+
+**Changed defaults.** `db_03_retrieval_eval.py` now defaults to `variants = off:5,llm:5`; the earlier val comparison used
+`off:5,on:5,off:7,on:7` (set the widget back to reproduce it; `on` is the AI Search reranker, which Free Edition does not run). The LLM
+reranker defaults to the 8B model `databricks-meta-llama-3-1-8b-instruct` (a 70B model is a widget change); no reranker model has been
+compared yet, and a small model may follow the JSON ranking instruction less reliably.
 
 `rag.llm_rerank.LLMReranker` is a listwise reranker: one chat call per query ranks the top `candidates_k` hits (each cut to 1,500
 characters) and returns passage numbers as JSON. An unusable reply raises `RerankerUnavailable` (a run is never labelled "reranked"
 when it was not); the chatbot instead falls back to no rerank and shows a warning. `rag.chat.Chatbot` and `rag.serving_agent` hold the
-chatbot logic. **Not yet evaluated:** whether the LLM reranker beats `off` or the AI Search reranker (run `db_run_all.py` with
-`variants = off:5,on:5,llm:5`), and the `FULL_TEXT` / `ANN` query types on this index (`db_04_chatbot.py` checks them at start-up).
+chatbot logic. **Not yet evaluated:** whether the LLM reranker beats `off` or the AI Search reranker (run `db_pipeline.py` with
+`variants = off,llm`; add `on` where the AI Search reranker is available), and the `FULL_TEXT` / `ANN` query types on this index (`db_04_chatbot.py` checks them at start-up).
 
 ## RAGAS (optional)
 `run_eval run --ragas` scores faithfulness, answer relevancy, context precision/recall and factual correctness with a

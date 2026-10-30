@@ -12,11 +12,11 @@
 # MAGIC
 # MAGIC **Needs:** the chunks Delta table from `db_01_ingest_chunks.py` (columns `id, source, page, section, kind, text`, change data feed on) and `<data_dir>/testset_val.jsonl` for the smoke test.
 # MAGIC **Safe to re-run:** an existing index is reused (`recreate = no`); `recreate = yes` deletes and rebuilds it (use after the chunks table changed shape).
-# MAGIC The last cell returns a JSON status (used by `db_run_all.py`).
+# MAGIC The last cell returns a JSON status.
 
 # COMMAND ----------
 
-dbutils.widgets.text("git_ref", "qasper-corpus", "branch or commit of the code to run (db_run_all.py pins one commit)")
+dbutils.widgets.text("git_ref", "qasper-corpus", "branch or commit of the code to run (set a commit to reproduce a run exactly)")
 dbutils.widgets.text("data_dir", "/Volumes/workspace/default/documents/carbon_eval", "Volume folder with testset_val.jsonl")
 dbutils.widgets.text("source_table", "workspace.carbon_rag.chunks_1024", "chunks Delta table")
 dbutils.widgets.text("index_name", "workspace.carbon_rag.chunks_1024_idx", "AI Search index name")

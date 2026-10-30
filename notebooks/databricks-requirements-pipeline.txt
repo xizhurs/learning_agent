@@ -1,0 +1,6 @@
+# Everything db_pipeline.py needs in one environment: RAGAS + judge client, AI Search client, endpoint (OpenAI-compatible) client.
+# Checked with `uv pip compile ... -c databricks-constraints.txt --python-version 3.12 --python-platform aarch64-manylinux_2_28`:
+# resolves together without changing any preinstalled version listed there.
+-r databricks-requirements-ragas.txt
+-r databricks-requirements-aisearch.txt
+databricks-openai

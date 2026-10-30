@@ -20,14 +20,14 @@
 # MAGIC Catalog and served; the two options then travel in `custom_inputs`. Deploying it to Model Serving is a separate, paid step that this notebook does not do.
 # MAGIC **Data:** questions and the retrieved passages are sent to the Databricks endpoints named below. The index holds public documents only (see `db_01b_load_chunks_parquet.py`);
 # MAGIC do not point `index_name` at an index with non-public content.
-# MAGIC **Not measured:** which option is best is decided by `db_run_all.py` on the val questions, not by this notebook. Run `db_02_ai_search_index.py` first (the index must exist).
+# MAGIC **Not measured:** which option is best is decided by `db_pipeline.py` on the val questions, not by this notebook. Run `db_02_ai_search_index.py` first (the index must exist).
 
 # COMMAND ----------
 
 dbutils.widgets.text("index_name", "workspace.carbon_rag.chunks_1024_idx", "AI Search index name")
 dbutils.widgets.text("endpoint", "carbon", "AI Search endpoint")
 dbutils.widgets.text("gen_endpoint", "databricks-meta-llama-3-3-70b-instruct", "chat endpoint that writes the answers")
-dbutils.widgets.text("rerank_endpoint", "databricks-meta-llama-3-3-70b-instruct", "chat endpoint for rerank = llm (non-reasoning model)")
+dbutils.widgets.text("rerank_endpoint", "databricks-meta-llama-3-1-8b-instruct", "small chat endpoint for rerank = llm (non-reasoning model)")
 dbutils.widgets.text("top_k", "5", "passages given to the model")
 dbutils.widgets.text("candidates_k", "20", "hits ranked by the LLM reranker")
 dbutils.widgets.dropdown("retrieval_mode", "hybrid", ["fts", "vector", "hybrid"], "retrieval mode")

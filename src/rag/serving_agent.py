@@ -20,7 +20,7 @@ DEFAULTS = {
     "index_name": "workspace.carbon_rag.chunks_1024_idx",
     "search_endpoint": "carbon",
     "generation_endpoint": "databricks-meta-llama-3-3-70b-instruct",
-    "rerank_endpoint": "databricks-meta-llama-3-3-70b-instruct",
+    "rerank_endpoint": "databricks-meta-llama-3-1-8b-instruct",
     "top_k": 5,
     "candidates_k": 20,
     "retrieval_mode": "hybrid",
